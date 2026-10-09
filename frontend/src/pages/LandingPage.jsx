@@ -11,10 +11,15 @@ const STATS = [
 
 const SERVICES = [
   {
-    ic: '🏡',
+    ic: '🎙️',
     gold: true,
+    title: 'Talk to LykAI',
+    body: 'Tell LykAI what you want — it asks one question at a time, searches the full listing dataset and shares matching property cards in the chat. English, Tamil or Tanglish.',
+  },
+  {
+    ic: '🏡',
     title: 'Buy property in Dubai',
-    body: 'Off-plan and ready homes matched to your budget. Tell the AI what you need and it searches the full listing dataset instantly.',
+    body: 'Off-plan and ready homes matched to your budget — LykAI finds them for you while you chat.',
   },
   {
     ic: '🔑',
@@ -25,11 +30,6 @@ const SERVICES = [
     ic: '📈',
     title: 'Investment advisory',
     body: 'Rental yield and ROI guidance with a consultant that remembers your goals across every conversation.',
-  },
-  {
-    ic: '🎙️',
-    title: 'AI property concierge',
-    body: 'Speak or type in English, Tamil or Tanglish. The agent asks one question at a time and never invents property details.',
   },
 ]
 
@@ -103,20 +103,21 @@ export default function LandingPage() {
             <span className="eyebrow">Dubai Real Estate · Est. 2024</span>
             <h1>
               Buy, rent &amp; lease property in Dubai —{' '}
-              <em>with an AI that actually listens.</em>
+              <em>just tell LykAI what you need.</em>
             </h1>
             <p className="lead">
               Describe what you want — location, budget, bedrooms — in English, Tamil
-              or Tanglish. Our AI consultant searches 25,000+ listings, remembers your
-              preferences and walks you to the right property. Voice or text, anytime.
+              or Tanglish. LykAI, your AI property concierge, asks one question at a
+              time, searches 25,000+ listings and walks you to the right property.
+              Voice or text, anytime.
             </p>
 
             <div className="hero-cta">
               <button className="btn gold" onClick={() => navigate('/chat')}>
-                <span className="ico">→</span> Start a conversation
+                <span className="ico">→</span> Talk to LykAI
               </button>
-              <button className="btn light" onClick={() => navigate('/history')}>
-                View past chats
+              <button className="btn light" onClick={() => navigate('/properties')}>
+                Explore Properties
               </button>
             </div>
 
@@ -158,7 +159,7 @@ export default function LandingPage() {
               style={{ marginTop: 16 }}
               onClick={() => navigate('/chat')}
             >
-              <span className="ico">→</span> Try it now
+              <span className="ico">→</span> Talk to LykAI
             </button>
             <div
               className="sub"
@@ -169,8 +170,8 @@ export default function LandingPage() {
               }}
             >
               {health?.status === 'healthy'
-                ? '● Backend online — searching live'
-                : '○ Backend offline — start the server'}
+                ? '● LykAI is online — live property search'
+                : '○ LykAI is offline — please try again soon'}
             </div>
           </aside>
         </div>
@@ -202,7 +203,7 @@ export default function LandingPage() {
         <div className="section-title">
           <span className="eyebrow center">Where we work</span>
           <h2>Communities we cover</h2>
-          <p>Ask the AI about any of these — plus every other corner of the UAE.</p>
+          <p>Ask LykAI about any of these — plus every other corner of the UAE.</p>
         </div>
         <div className="communities">
           {COMMUNITIES.map((c) => (
@@ -222,7 +223,7 @@ export default function LandingPage() {
       {/* ============ AI CAPABILITIES (on maroon) ============ */}
       <section className="section on-maroon">
         <div className="section-title">
-          <span className="eyebrow center">The AI difference</span>
+          <span className="eyebrow center">The LykAI difference</span>
           <h2>A consultant that remembers every word</h2>
           <p>
             Built like a production real-estate desk: deterministic search,
@@ -265,10 +266,10 @@ export default function LandingPage() {
         <div className="container">
           <div className="cta-card">
             <span className="eyebrow center">Ready when you are</span>
-            <h2>Let’s find your next home in Dubai.</h2>
+            <h2>Tell LykAI what you’re looking for.</h2>
             <p>
-              Start a chat, switch on your microphone, and let the AI do the
-              searching — no pressure, no confusion.
+              One conversation — LykAI understands, finds matching properties and
+              helps you decide. No pressure, no confusion.
             </p>
             <div
               style={{
@@ -279,7 +280,7 @@ export default function LandingPage() {
               }}
             >
               <button className="btn gold" onClick={() => navigate('/chat')}>
-                <span className="ico">→</span> Talk to the AI agent
+                <span className="ico">→</span> Talk to LykAI
               </button>
               <a
                 className="btn light"

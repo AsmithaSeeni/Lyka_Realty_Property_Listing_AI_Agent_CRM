@@ -1,13 +1,22 @@
 import React from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import api from '../api.js'
 
 export default function ConversationHistory() {
   const navigate = useNavigate()
+  const [customer, setCustomer] = React.useState(null) // null = still checking
+  const [guestViewed, setGuestViewed] = React.useState(false)
   const [conversations, setConversations] = React.useState([])
+  const [savedProps, setSavedProps] = React.useState([])
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState(null)
   const [preview, setPreview] = React.useState(null) // conversation detail
+
+  // Who is here? Guests see the (non-blocking) sign-in explanation first —
+  // history is an optional, signed-in feature, never the main experience.
+  React.useEffect(() => {
+    api.customerMe().then(setCustomer).catch(() => setCustomer(null))
+  }, [])
 
   const load = React.useCallback(() => {
     setLoading(true)
@@ -19,6 +28,13 @@ export default function ConversationHistory() {
   }, [])
 
   React.useEffect(load, [load])
+
+  // Saved properties (signed-in customers only)
+  React.useEffect(() => {
+    if (customer?.authenticated) {
+      api.savedProperties().then((r) => setSavedProps(r.results || [])).catch(() => {})
+    }
+  }, [customer?.authenticated])
 
   // Escape closes the conversation preview drawer
   React.useEffect(() => {
@@ -39,38 +55,136 @@ export default function ConversationHistory() {
     }
   }
 
+  const signOut = async () => {
+    try {
+      await api.customerLogout()
+    } catch { /* cookie is gone either way */ }
+    window.dispatchEvent(new Event('lyka:customer'))
+    navigate('/chat', { replace: true })
+  }
+
+  /* -------- still checking identity -------- */
+  if (customer === null) {
+    return (
+      <div className="page">
+        <div className="empty">Loading…</div>
+      </div>
+    )
+  }
+
+  /* -------- guest: the optional-sign-in explanation first -------- */
+  if (!customer.authenticated && !guestViewed) {
+    return (
+      <div className="page">
+        <div className="keep-prompt keep-prompt--page">
+          <span className="eyebrow">Your conversations</span>
+          <h2>Want to keep your LykAI conversations and saved properties?</h2>
+          <p>
+            Your chats with LykAI are saved on this device for now. Sign in (it’s
+            free and optional) to keep them, reopen them anywhere and save
+            properties you like.
+          </p>
+          <div className="keep-prompt__btns">
+            <Link className="btn gold" to="/signin?mode=login&next=/history">
+              Sign In
+            </Link>
+            <Link className="btn dark" to="/signin?mode=register&next=/history">
+              Create Account
+            </Link>
+            <button className="btn ghost" onClick={() => setGuestViewed(true)}>
+              Continue as Guest
+            </button>
+          </div>
+          <Link className="keep-prompt__chat" to="/chat">
+            ← Back to LykAI
+          </Link>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="page">
       <div className="page-head">
         <div className="row">
           <div>
-            <span className="eyebrow">Memory</span>
-            <h1>Conversation History</h1>
+            <span className="eyebrow">{customer.authenticated ? 'Your account' : 'This device'}</span>
+            <h1>Your conversations</h1>
             <p>
-              Every chat is stored with timestamps and detected language. Reopen one
-              to continue with full context.
+              {customer.authenticated
+                ? `Signed in as ${customer.email}. Reopen any chat with LykAI and continue with full context.`
+                : 'Chats saved on this device only — sign in anytime to keep them forever.'}
             </p>
           </div>
-          <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <button className="btn ghost btn-sm" onClick={load}>↻ Refresh</button>
             <button className="btn gold btn-sm" onClick={() => navigate('/chat')}>
-              <span className="ico">+</span> New chat
+              <span className="ico">→</span> Talk to LykAI
             </button>
+            {customer.authenticated && (
+              <button className="btn dark btn-sm" onClick={signOut}>Sign out</button>
+            )}
           </div>
         </div>
       </div>
 
       {error && <div className="notice">⚠️ {error}</div>}
 
+      {/* Guest banner: one quiet reminder, dismissible by signing in later */}
+      {!customer.authenticated && (
+        <div className="keep-banner">
+          💬 Want to keep these chats?{' '}
+          <Link to="/signin?next=/history">Sign in</Link> or{' '}
+          <Link to="/signin?mode=register&next=/history">create a free account</Link>.
+        </div>
+      )}
+
+      {/* Saved properties (signed-in) */}
+      {customer.authenticated && savedProps.length > 0 && (
+        <>
+          <div className="subhead">Saved properties</div>
+          <div className="browse-grid" style={{ marginBottom: 26 }}>
+            {savedProps.map((p) => (
+              <article className="prop-card browse-card" key={p.property_id}>
+                <div className="prop-thumb">
+                  <span>{/villa/i.test(p.property_type || '') ? '🏡' : '🏢'}</span>
+                  <span className="loc">📍 {p.location || ''}</span>
+                </div>
+                <div className="prop-body">
+                  <div className="prop-price">AED {p.price}</div>
+                  <div className="prop-title">{p.property_type || 'Property'} · {p.location}</div>
+                  <div className="browse-ctas">
+                    <button
+                      className="btn gold btn-sm"
+                      onClick={() => navigate(`/property/${p.property_id}`)}
+                    >
+                      View Property
+                    </button>
+                    <button
+                      className="btn ghost btn-sm"
+                      onClick={() => navigate(`/chat?ref=${p.property_id}`)}
+                    >
+                      Ask LykAI
+                    </button>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="subhead">Chats</div>
+
       {loading && <div className="empty">Loading conversations…</div>}
 
       {!loading && conversations.length === 0 && !error && (
         <div className="empty">
           <div className="big">💬</div>
-          No conversations yet — start one with the AI agent.
+          No conversations yet — start one with LykAI.
           <div style={{ marginTop: 18 }}>
             <button className="btn btn-gold btn-sm" onClick={() => navigate('/chat')}>
-              Start chatting
+              Talk to LykAI
             </button>
           </div>
         </div>
@@ -144,7 +258,7 @@ export default function ConversationHistory() {
             {(preview.messages || []).map((m) => (
               <div className="mini-msg" key={m.id}>
                 <b>
-                  {m.role === 'user' ? 'Customer' : 'AI'}
+                  {m.role === 'user' ? 'You' : 'LykAI'}
                   {m.detected_language && m.detected_language !== 'en'
                     ? ` · ${m.detected_language}`
                     : ''}
@@ -182,7 +296,7 @@ export default function ConversationHistory() {
                 className="btn btn-dark btn-sm"
                 onClick={() => navigate(`/chat/${preview.id}`)}
               >
-                Reopen with full context →
+                Reopen with LykAI →
               </button>
               <button className="btn btn-ghost btn-sm" onClick={() => setPreview(null)}>
                 Close

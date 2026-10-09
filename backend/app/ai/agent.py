@@ -44,6 +44,10 @@ class ConversationState:
         self.asked_questions = set()
         # Property recommendations for this conversation
         self.recommended_properties: List[Dict] = []
+        # Listing the customer opened from its details page during THIS turn
+        # ("Ask LykAI about this property"). Per-turn only — set by respond(),
+        # merged into the visible cards, cleared before respond() returns.
+        self.focus_property: Optional[Dict[str, Any]] = None
         # Language detection
         self.detected_language = "en"
         # Arabic/English mixed handling
@@ -87,12 +91,12 @@ class ConversationState:
 
 class AIRealEstateAgent:
     """
-    Human-like AI real estate consultant that behaves like an experienced
+    Human-like AI property concierge (LykAI) that behaves like an experienced
     UAE real estate agent.
     """
     
     # System prompt defining the agent's personality
-    SYSTEM_PROMPT = """You are Lyka Realty's AI real estate consultant - an experienced, 
+    SYSTEM_PROMPT = """You are LykAI - Lyka Realty's AI property concierge, an experienced, 
     knowledgeable UAE property expert. You speak naturally and conversationally, 
     like a human agent who knows the market well.
 
@@ -118,15 +122,38 @@ class AIRealEstateAgent:
     7. Never make up details about properties, locations, or prices.
 
     CONVERSATION FLOW:
-    - Start by greeting the customer
+    - Start by greeting the customer warmly, introducing yourself naturally, e.g.
+      "Hi! I'm LykAI, your AI property concierge from Lyka Realty. Tell me what
+      kind of property you're looking for, and I'll help you find the right match."
+      Do NOT repeat your name in every message - once at the start (and if asked) is enough.
     - Ask about their primary need: buying or renting
     - Then ask about location preference
     - Then budget
     - Then property type (apartment, villa, townhouse)
     - Then bedrooms
     - Then any other preferences
+    - When you have enough requirements, say something natural like "I found a
+      few properties that match what you're looking for." The property cards are
+      rendered automatically by the interface - never paste long listing tables.
     - Naturally collect contact info when the conversation is flowing
     - Create a lead when enough information is available
+
+    SHOWING PROPERTIES:
+    - The chat interface displays property cards automatically; your job is the
+      conversation around them.
+    - After a matching search, briefly say what you found and WHY it fits, then
+      invite the customer to open a card ("View Property") for full details.
+    - A CONTEXT block may list properties already shown to the customer, numbered
+      in the order the cards appear in their chat. If the customer says "the
+      second property", "this property", "that one", or gives a listing number,
+      resolve it from that list - NEVER ask them for a property ID.
+
+    LEAD CAPTURE (conversational - never a registration form):
+    - When the customer shows meaningful interest in a specific property, offer
+      human help naturally, e.g.: "I can have a Lyka Realty specialist help you
+      with this property. What's the best name and phone number to reach you?"
+    - Ask once, in one short message. If they don't answer, move on and keep
+      helping them browse - never push twice.
 
     LANGUAGE:
     - Understand English, Tamil, Tanglish, and mixed Tamil-English
@@ -203,11 +230,19 @@ class AIRealEstateAgent:
         else:
             return "en", "en"  # English
     
-    def respond(self, user_message: str) -> Dict[str, Any]:
+    def respond(
+        self,
+        user_message: str,
+        focus_property: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Process a user message and return the AI's response.
         Returns dict with: response, action (continue/lead_created), 
         properties (if recommendations), language_style
+
+        focus_property: dataset row for a listing the customer just opened
+        from its details page ("Ask LykAI about this property"), so follow-ups
+        resolve against real dataset values.
         """
         # Detect language
         lang_code, lang_style = self.detect_language_and_style(user_message)
@@ -219,6 +254,17 @@ class AIRealEstateAgent:
         
         # Extract requirements (budget, location, beds, buy/rent) from the message
         self._extract_requirements(user_message)
+
+        # Keep the opened property in the conversation's recommendation list so
+        # it survives restarts and can be referenced as "the first property".
+        # Lives only for this turn (cleared before respond() returns).
+        if focus_property:
+            self.state.focus_property = focus_property
+            pid = focus_property.get("property_id")
+            if not any(p.get("property_id") == pid for p in self.state.recommended_properties):
+                self.state.recommended_properties = (
+                    [focus_property] + self.state.recommended_properties
+                )
         
         # Handle refinement follow-ups ("cheaper ones", "what about 3 beds")
         # only after the conversation is already underway - the first message
@@ -229,34 +275,45 @@ class AIRealEstateAgent:
         if followup_result:
             # Still add the assistant response
             self.state.add_message("assistant", followup_result.get("response", ""), lang_code)
+            self.state.focus_property = None
             return followup_result
         
+        # Deterministic search runs BEFORE the reply so LykAI knows its cards
+        # are being attached and can announce them naturally ("I found a few
+        # properties that match what you're looking for"). Cards are attached
+        # only when the result differs from what is already visible, so the
+        # conversation never floods with duplicate cards.
+        fresh_properties = self._auto_search_if_needed()
+
         # Process the message with the LLM (synchronous call)
         # Build conversation history for the API
         history = [{"role": m["role"], "content": m["content"]} 
                   for m in self.state.messages[:-1]]  # Exclude current message
-        
-        response = nvidia_client.chat_sync(self.SYSTEM_PROMPT, user_message, history)
+
+        # Dynamic context so LykAI can announce fresh matches and answer
+        # "tell me more about the second property" from the numbered cards.
+        system_prompt = self.SYSTEM_PROMPT
+        context_block = self._context_block(focus_property, fresh_properties)
+        if context_block:
+            system_prompt = f"{self.SYSTEM_PROMPT}\n{context_block}"
+        # Per-turn focus is now captured in the context block
+        self.state.focus_property = None
+
+        response = nvidia_client.chat_sync(system_prompt, user_message, history)
         
         # Add assistant response to history
         self.state.add_message("assistant", response, lang_code)
         
-        # Parse the response to extract actions and property recommendations
+        # Parse the response for actions (lead hints). Property cards always
+        # come from the deterministic dataset search - never from LLM text.
         parsed = self._parse_response(response)
-        
-        # If we have enough requirements and no properties attached yet,
-        # run a search so the customer actually sees matching properties
-        properties = parsed.get("properties", [])
-        if not properties and self._should_show_properties():
-            search_result = self._search_with_criteria(**self._requirements_to_criteria())
-            if search_result:
-                properties = search_result.get("properties", [])
-                parsed["action"] = "recommendations"
+        if fresh_properties:
+            parsed["action"] = "recommendations"
         
         return {
             "response": response,
             "action": parsed.get("action", "continue"),
-            "properties": properties,
+            "properties": fresh_properties,
             "language_style": lang_style,
             "detected_language": lang_code,
         }
@@ -264,14 +321,119 @@ class AIRealEstateAgent:
     def _should_show_properties(self) -> bool:
         """
         Decide whether we have enough requirements to show properties.
-        Requires at least a location or property type plus bedrooms/budget.
+
+        Follows the canonical customer journey: an anchor (location or
+        property type) PLUS a budget. LykAI asks for the budget first
+        ("What's your approximate budget?") and only then are matching cards
+        attached - the customer never sees properties before the search is
+        meaningful.
         """
         req = self.state.requirements
         has_anchor = bool(req.get("location") or req.get("property_type"))
-        has_detail = bool(
-            req.get("bedrooms") is not None or req.get("budget")
-        )
-        return has_anchor and has_detail
+        return has_anchor and bool(req.get("budget"))
+
+    def _auto_search_if_needed(self) -> List[Dict[str, Any]]:
+        """Run the deterministic dataset search when requirements are complete.
+
+        Returns the fresh property list to attach to this reply, or [] when
+        requirements are incomplete or the result only contains listings whose
+        cards are already visible (so duplicate cards are never re-attached and
+        ordinal references like "the second property" keep matching what the
+        customer sees).
+        """
+        if not self._should_show_properties():
+            return []
+        prev = list(self.state.recommended_properties)
+        result = self._search_with_criteria(**self._requirements_to_criteria())
+        if not result:
+            return []
+        new_props = result.get("properties", [])
+        new_ids = {p.get("property_id") for p in new_props}
+        prev_ids = {p.get("property_id") for p in prev}
+        if prev_ids and new_ids and new_ids.issubset(prev_ids):
+            # Same listings already shown as cards - keep the existing order.
+            self.state.recommended_properties = prev
+            return []
+        return new_props
+
+    def _context_block(
+        self,
+        focus_property: Optional[Dict[str, Any]] = None,
+        fresh_properties: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """Internal context appended to the system prompt (never customer-facing).
+
+        Gives the LLM (a) requirements gathered so far, (b) whether fresh cards
+        are attached to THIS reply (and that it should announce them), (c) the
+        numbered list of properties already shown in this conversation, and
+        (d) any property the customer opened from its details page. Compact
+        one-line summaries of the eight dataset fields only - the full
+        dataset/JSON is never sent to the model.
+        """
+        lines: List[str] = ["", "CONTEXT (internal - never mention this block to the customer):"]
+
+        req = self.state.requirements
+        known = [
+            f"  - {label}: {value}"
+            for label, value in (
+                ("looking to", req.get("buy_rent")),
+                ("location", req.get("location")),
+                ("budget", req.get("budget")),
+                ("property type", req.get("property_type")),
+                ("bedrooms", req.get("bedrooms")),
+                ("bathrooms", req.get("bathrooms")),
+            )
+            if value not in (None, "")
+        ]
+        if known:
+            lines.append("Requirements gathered so far:")
+            lines.extend(known)
+
+        recs = self.state.recommended_properties[:10]
+        if fresh_properties:
+            lines.append(
+                f"NEW MATCHES: {len(fresh_properties)} properties matched - their "
+                "cards are attached to your reply THIS turn. Announce them "
+                "naturally (e.g. \"I found a few properties that match what you're "
+                "looking for\"), say briefly WHY they fit the stated requirements, "
+                "then continue the conversation (at most one question)."
+            )
+        elif recs:
+            lines.append(
+                "No new cards this turn: do NOT announce or re-list matches - "
+                "the cards listed below are already visible in the chat."
+            )
+
+        if recs:
+            lines.append(
+                "Properties already shown to the customer (numbered exactly as "
+                "their cards appear in the chat):"
+            )
+            for i, p in enumerate(recs, 1):
+                lines.append(
+                    f"  {i}) {p.get('property_type') or 'Property'} | "
+                    f"{p.get('location') or 'UAE'} | "
+                    f"AED {p.get('price') or 'Not provided'} | "
+                    f"beds: {p.get('no__of__beds') or 'Not provided'} | "
+                    f"baths: {p.get('no_of_baths') or 'Not provided'} | "
+                    f"area: {p.get('area') or 'Not provided'} | "
+                    f"listing id: {p.get('property_id')}"
+                )
+
+        if focus_property:
+            p = focus_property
+            lines.append(
+                "The customer just opened this listing from its details page and "
+                "may ask about it (they never need to give you the id):\n"
+                f"  {p.get('property_type') or 'Property'} in "
+                f"{p.get('location') or 'UAE'} - AED {p.get('price') or 'Not provided'}, "
+                f"{p.get('no__of__beds') or 'Not provided'} beds, "
+                f"{p.get('no_of_baths') or 'Not provided'} baths, "
+                f"{p.get('area') or 'Not provided'}, listing id {p.get('property_id')}. "
+                f"Highlights: {p.get('highlights') or 'Not provided'}"
+            )
+
+        return "\n".join(lines)
     
     def _extract_requirements(self, message: str):
         """
@@ -422,10 +584,16 @@ class AIRealEstateAgent:
             # If no previous recommendations, search with existing requirements
             # but lower the budget if we have one
             criteria = self._requirements_to_criteria()
-            if criteria.get("max_price"):
-                criteria["max_price"] = criteria["max_price"] * 0.7
+            lowered = criteria.get("max_price")
+            if lowered:
+                criteria["max_price"] = lowered * 0.7
             result = self._search_with_criteria(**criteria)
             if result:
+                # Persist the lowered budget (only on success) so later
+                # searches stay consistent with the "cheaper" the customer
+                # just asked for - otherwise the pricier set comes back.
+                if lowered:
+                    self.state.requirements["budget"] = str(int(lowered * 0.7))
                 result["response"] = "Here are some more affordable options I found:"
                 return result
             return None
@@ -494,6 +662,14 @@ class AIRealEstateAgent:
             db.close()
         
         if props:
+            # A fresh search replaces the visible set - keep the property the
+            # customer opened from its details page in the list, since it is
+            # part of this conversation too.
+            focus = self.state.focus_property
+            if focus and not any(
+                p.get("property_id") == focus.get("property_id") for p in props
+            ):
+                props = [focus] + props
             self.state.recommended_properties = props
             return {
                 "action": "recommendations",

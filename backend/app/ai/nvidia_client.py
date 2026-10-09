@@ -158,8 +158,9 @@ class NVIDIAClient:
         msg = user_message.lower().strip()
         if any(word in msg for word in ["hello", "hi", "hey"]):
             return (
-                "Hello! I'm Lyka Realty's AI assistant. I can help you find "
-                "properties in the UAE. What are you looking for?"
+                "Hi! I'm LykAI, your AI property concierge from Lyka Realty. "
+                "I can help you find properties in the UAE — what are you "
+                "looking for?"
             )
         elif "thank" in msg or "thanks" in msg:
             return "You're welcome! Is there anything else I can help you with?"

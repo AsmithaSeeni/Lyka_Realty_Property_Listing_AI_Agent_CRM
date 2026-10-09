@@ -3,7 +3,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi import FastAPI
 
-app = FastAPI(title="Lyka Realty AI Agent + CRM", version="1.0.0")
+app = FastAPI(title="LykAI — AI Property Concierge by Lyka Realty (+ Agent CRM)", version="1.0.0")
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="frontend/dist"), name="static")

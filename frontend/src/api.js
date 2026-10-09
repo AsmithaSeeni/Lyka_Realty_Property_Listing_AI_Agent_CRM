@@ -22,12 +22,17 @@ async function handle(res) {
 export const api = {
   health: () => fetch('/api/health').then(handle),
 
-  // Chat
-  chat: (message, conversationId = null) =>
+  // Chat — propertyId is the listing the customer is viewing (context for LykAI)
+  chat: (message, conversationId = null, propertyId = null) =>
     fetch('/api/chat', {
       method: 'POST',
       headers: JSON_HEADERS,
-      body: JSON.stringify({ message, conversation_id: conversationId }),
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        ...(propertyId ? { property_id: propertyId } : {}),
+      }),
     }).then(handle),
 
   // Conversations
@@ -40,6 +45,38 @@ export const api = {
       body: JSON.stringify(data),
     }).then(handle),
 
+  // ---- Customer accounts (optional — guests chat without signing in) ----
+  customerMe: () => fetch('/api/customer/me', { credentials: 'same-origin' }).then(handle),
+  customerRegister: (email, password, name = '') =>
+    fetch('/api/customer/register', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ email, password, name }),
+    }).then(handle),
+  customerLogin: (email, password) =>
+    fetch('/api/customer/login', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ email, password }),
+    }).then(handle),
+  customerLogout: () =>
+    fetch('/api/customer/logout', { method: 'POST', credentials: 'same-origin' }).then(handle),
+
+  // Saved properties (signed-in customers)
+  savedProperties: () =>
+    fetch('/api/customer/saved', { credentials: 'same-origin' }).then(handle),
+  saveProperty: (propertyId) =>
+    fetch('/api/customer/saved', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ property_id: propertyId }),
+    }).then(handle),
+  unsaveProperty: (propertyId) =>
+    fetch(`/api/customer/saved/${propertyId}`, { method: 'DELETE', credentials: 'same-origin' }).then(handle),
+
   // Properties
   searchProperties: (params = {}) => {
     const qs = new URLSearchParams()
@@ -50,22 +87,48 @@ export const api = {
   },
   getProperty: (id) => fetch(`/api/properties/${id}`).then(handle),
 
-  // Leads / CRM
-  listLeads: (status = null) =>
-    fetch(`/api/leads${status ? `?status=${status}` : ''}`).then(handle),
-  getLead: (id) => fetch(`/api/leads/${id}`).then(handle),
-  createLead: (data) =>
-    fetch('/api/leads', {
+  // ---- Agent authentication (internal CRM) ----
+  login: (username, password) =>
+    fetch('/api/auth/login', {
       method: 'POST',
       headers: JSON_HEADERS,
-      body: JSON.stringify(data),
+      credentials: 'same-origin',
+      body: JSON.stringify({ username, password }),
     }).then(handle),
-  updateLead: (id, data) =>
-    fetch(`/api/leads/${id}`, {
+  logout: () =>
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).then(handle),
+  me: () => fetch('/api/auth/me', { credentials: 'same-origin' }).then(handle),
+
+  // ---- Agent CRM (protected — validated server-side on every request) ----
+  agentDashboard: () => fetch('/api/agent/dashboard', { credentials: 'same-origin' }).then(handle),
+
+  agentLeads: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return fetch(`/api/agent/leads${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' }).then(handle)
+  },
+  agentLead: (id) => fetch(`/api/agent/leads/${id}`, { credentials: 'same-origin' }).then(handle),
+  updateAgentLead: (id, data) =>
+    fetch(`/api/agent/leads/${id}`, {
       method: 'PATCH',
       headers: JSON_HEADERS,
+      credentials: 'same-origin',
       body: JSON.stringify(data),
     }).then(handle),
+
+  agentConversations: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return fetch(`/api/agent/conversations${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' }).then(handle)
+  },
+  agentConversation: (id) =>
+    fetch(`/api/agent/conversations/${id}`, { credentials: 'same-origin' }).then(handle),
 
   // Voice
   transcribe: (blob, language = null) => {

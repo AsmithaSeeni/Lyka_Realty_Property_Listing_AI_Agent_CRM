@@ -1,11 +1,12 @@
 import React from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams, Link } from 'react-router-dom'
 import api from '../api.js'
 
 /* ------------------------------------------------------------------ */
-/* Property card                                                       */
+/* Property card — rendered inline inside the conversation, right under */
+/* the LykAI reply that recommended it.                                 */
 /* ------------------------------------------------------------------ */
-function PropertyCard({ prop, onOpen }) {
+function PropertyCard({ prop, index, onOpen }) {
   const beds = prop.no__of__beds ?? prop.bedrooms ?? '—'
   const baths = prop.no_of_baths ?? prop.bathrooms ?? '—'
   const price = prop.price
@@ -18,22 +19,34 @@ function PropertyCard({ prop, onOpen }) {
     /studio/i.test(String(beds)) ? '🏠' :
     /plot|land/i.test(type) ? '🗺️' : '🏢'
 
+  const highlights = String(prop.highlights || '')
+    .split(/[;,]|\n/)
+    .map((h) => h.trim())
+    .filter((h) => h.length > 3)
+    .slice(0, 2)
+
   return (
-    <button className="prop-card" onClick={() => onOpen(prop)}>
-      <div className="prop-thumb">
-        <span>{emoji}</span>
-        <span className="loc">📍 {loc}</span>
-      </div>
-      <div className="prop-body">
-        <div className="prop-price">AED {price}</div>
-        <div className="prop-title">{type} · {loc}</div>
-        <div className="prop-specs">
-          <span>🛏 {beds}</span>
-          <span>🛁 {baths}</span>
-          <span>📐 {prop.area || '—'}</span>
+    <div className="pcard">
+      <div className="pcard-top">
+        <span className="pcard-emoji" aria-hidden="true">{emoji}</span>
+        <div className="pcard-head">
+          <div className="pcard-price">AED {price}</div>
+          <div className="pcard-title">{type} · 📍 {loc}</div>
         </div>
+        {index != null && <span className="pcard-num" title={`Recommendation ${index}`}>{index}</span>}
       </div>
-    </button>
+      <div className="pcard-specs">
+        <span>🛏 {beds} bd</span>
+        <span>🛁 {baths} ba</span>
+        <span>📐 {prop.area || '—'}</span>
+      </div>
+      {highlights.length > 0 && (
+        <div className="pcard-high">{highlights.join(' · ')}</div>
+      )}
+      <button className="pcard-cta" onClick={() => onOpen(prop)}>
+        View Property →
+      </button>
+    </div>
   )
 }
 
@@ -73,6 +86,7 @@ function speakText(text) {
 export default function ChatPage() {
   const navigate = useNavigate()
   const { conversationId: routeConvId } = useParams()
+  const [searchParams] = useSearchParams()
 
   const [conversations, setConversations] = React.useState([])
   const [sideOpen, setSideOpen] = React.useState(false) // mobile drawer
@@ -82,9 +96,12 @@ export default function ChatPage() {
   const [messages, setMessages] = React.useState([])
   const [input, setInput] = React.useState('')
   const [typing, setTyping] = React.useState(false)
-  const [properties, setProperties] = React.useState([])
   const [error, setError] = React.useState(null)
   const [language, setLanguage] = React.useState('auto')
+  const [customer, setCustomer] = React.useState(null)
+  // Listing opened via "Ask LykAI about this property" (?ref=<id>) — keeps the
+  // property in play so the customer never has to re-describe or give an id.
+  const [focus, setFocus] = React.useState(null)
 
   // Voice state
   const [voiceMode, setVoiceMode] = React.useState(false)
@@ -105,38 +122,105 @@ export default function ChatPage() {
 
   React.useEffect(loadConversations, [loadConversations])
 
+  /* -------- signed-in or guest? (sidebar sign-in nudge is guest-only) -------- */
+  React.useEffect(() => {
+    api.customerMe().then(setCustomer).catch(() => setCustomer(null))
+  }, [])
+
+  /* -------- arriving from a property page: ?ref=<id> becomes the focus -------- */
+  React.useEffect(() => {
+    const ref = Number(searchParams.get('ref'))
+    if (ref > 0) {
+      api
+        .getProperty(ref)
+        .then((p) => setFocus(p))
+        .catch(() => setFocus({ property_id: ref }))
+    }
+  }, [searchParams])
+
+  /* -------- resume the active conversation when opened without a URL id
+       (e.g. "Ask LykAI about this property" lands on /chat?ref=…).
+       Verified first — stale ids (other browser, deleted threads) are
+       dropped so the customer always lands in a working conversation. -------- */
+  React.useEffect(() => {
+    if (routeConvId) return
+    const saved = Number(sessionStorage.getItem('lyka_active_conv') || 0)
+    if (saved > 0) {
+      api
+        .getConversation(saved)
+        .then(() => {
+          setConversationId(saved)
+          navigate(`/chat/${saved}`, { replace: true })
+        })
+        .catch(() => sessionStorage.removeItem('lyka_active_conv'))
+    }
+  }, [routeConvId, navigate])
+
   /* -------- load a conversation's history -------- */
   React.useEffect(() => {
     if (!routeConvId) return
-    setConversationId(Number(routeConvId))
+    const id = Number(routeConvId)
+    setConversationId(id)
+    sessionStorage.setItem('lyka_active_conv', String(id))
     api
-      .getConversation(routeConvId)
+      .getConversation(id)
       .then((conv) => {
-        const hist = (conv.messages || []).map((m) => ({
-          role: m.role,
-          content: m.content,
-          language: m.detected_language,
-          at: m.created_at,
-        }))
-        setMessages(hist)
         const recs = conv.property_recommendations || []
-        if (recs.length) {
-          setProperties(
-            recs.map((r) => ({
-              property_id: r.property_id,
-              price: r.price,
-              property_type: r.property_type,
-              location: r.location,
-              no__of__beds: r.bedrooms,
-              no_of_baths: r.bathrooms,
-              area: r.area,
-              highlights: r.highlights,
-            })),
-          )
+        const recById = new Map(recs.map((r) => [r.property_id, r]))
+        const toCard = (r) => ({
+          property_id: r.property_id,
+          price: r.price,
+          property_type: r.property_type,
+          location: r.location,
+          no__of__beds: r.bedrooms,
+          no_of_baths: r.bathrooms,
+          area: r.area,
+          highlights: r.highlights,
+        })
+
+        const used = new Set()
+        const hist = (conv.messages || []).map((m) => {
+          let cards
+          if (m.property_recommendation_ids?.length) {
+            cards = m.property_recommendation_ids
+              .map((pid) => recById.get(pid))
+              .filter(Boolean)
+              .map(toCard)
+            cards.forEach((c) => used.add(c.property_id))
+          }
+          return {
+            role: m.role,
+            content: m.content,
+            language: m.detected_language,
+            at: m.created_at,
+            properties: cards,
+          }
+        })
+
+        // Older messages have no per-message ids — attach the leftover cards
+        // to the last reply so history still shows what was recommended.
+        const leftover = recs.filter((r) => !used.has(r.property_id)).map(toCard)
+        if (leftover.length) {
+          for (let i = hist.length - 1; i >= 0; i--) {
+            if (hist[i].role === 'assistant') {
+              hist[i].properties = [...(hist[i].properties || []), ...leftover]
+              break
+            }
+          }
+        }
+        setMessages(hist)
+      })
+      .catch((e) => {
+        // Foreign/stale thread (404) — fall back to a fresh chat so the
+        // customer never gets stuck in a conversation they can't send to.
+        if (e?.status === 404) {
+          sessionStorage.removeItem('lyka_active_conv')
+          setConversationId(null)
+          setMessages([])
+          navigate('/chat', { replace: true })
         }
       })
-      .catch(() => {})
-  }, [routeConvId])
+  }, [routeConvId, navigate])
 
   /* -------- autoscroll -------- */
   React.useEffect(() => {
@@ -153,7 +237,7 @@ export default function ChatPage() {
 
   /* -------- send a text message -------- */
   const send = React.useCallback(
-    async (text, { fromVoice = false } = {}) => {
+    async (text, { fromVoice = false, propertyId = null } = {}) => {
       const msg = (text || '').trim()
       if (!msg) return
       setError(null)
@@ -161,21 +245,27 @@ export default function ChatPage() {
       setMessages((m) => [...m, { role: 'user', content: msg }])
       setTyping(true)
 
+      // While a property is in focus (arrived from its details page), pass it
+      // so LykAI can answer from the real dataset row — the customer just talks.
+      const focusId = propertyId || focus?.property_id || null
+
       try {
-        const res = await api.chat(msg, conversationId)
+        const res = await api.chat(msg, conversationId, focusId)
         setTyping(false)
         setConversationId(res.conversation_id)
+        sessionStorage.setItem('lyka_active_conv', String(res.conversation_id))
         setMessages((m) => [
           ...m,
           {
             role: 'assistant',
             content: res.response,
             language: res.detected_language,
+            // Cards render inline, directly under the reply that shared them
+            properties: res.properties?.length ? res.properties : undefined,
           },
         ])
-        if (res.properties && res.properties.length) {
-          setProperties(res.properties)
-        }
+        // The listing's context now lives in the conversation itself
+        if (focusId) setFocus(null)
         if (!conversationId) {
           // keep URL in sync so refresh/reopen works
           navigate(`/chat/${res.conversation_id}`, { replace: true })
@@ -191,20 +281,21 @@ export default function ChatPage() {
         }
       } catch (e) {
         setTyping(false)
-        setError(e.message || 'Something went wrong talking to the backend.')
+        setError(e.message || 'Something went wrong talking to LykAI.')
         if (fromVoice) setVoiceState('idle')
       }
     },
-    [conversationId, muted, navigate, loadConversations],
+    [conversationId, focus, muted, navigate, loadConversations],
   )
 
   /* -------- new conversation -------- */
   const newChat = () => {
     stopVoice()
     setSideOpen(false)
+    sessionStorage.removeItem('lyka_active_conv')
     setConversationId(null)
     setMessages([])
-    setProperties([])
+    setFocus(null)
     setError(null)
     navigate('/chat', { replace: true })
     setTimeout(() => inputRef.current?.focus(), 50)
@@ -320,7 +411,7 @@ export default function ChatPage() {
           <button className="btn btn-dark btn-sm btn-block" onClick={newChat}>
             + New conversation
           </button>
-          <div className="side-label">Recent</div>
+          <div className="side-label">Your conversations</div>
           {conversations.length === 0 && (
             <div style={{ fontSize: 13, color: 'var(--muted)', padding: '0 6px' }}>
               No conversations yet. Start one!
@@ -341,19 +432,28 @@ export default function ChatPage() {
               </span>
             </button>
           ))}
+
+          {/* Guests: one quiet, non-blocking nudge (never a popup) */}
+          {customer && !customer.authenticated && conversations.length > 0 && (
+            <div className="side-keep">
+              Want to keep your LykAI conversations?{' '}
+              <Link to="/signin?next=/history">Sign in</Link>
+            </div>
+          )}
         </aside>
 
         {/* Main column */}
         <main className="chat-main">
           <div className="chat-head">
             <div className="who">
-              <div className="avatar">AI</div>
+              <div className="avatar">LY</div>
               <div>
-                <b>Lyka AI Consultant</b>
+                <b>LykAI</b>
                 <span>
+                  AI Property Concierge by Lyka Realty
                   {currentConv
-                    ? `Conversation #${currentConv.id} · ${currentConv.message_count ?? messages.length} messages`
-                    : 'New conversation · English / தமிழ் / Tanglish'}
+                    ? ` · #${currentConv.id} · ${currentConv.message_count ?? messages.length} messages`
+                    : ''}
                 </span>
               </div>
             </div>
@@ -401,10 +501,10 @@ export default function ChatPage() {
               <div className="empty">
                 <div className="big">👋</div>
                 <b style={{ display: 'block', fontSize: 18, color: 'var(--ink)', marginBottom: 6 }}>
-                  Welcome! I'm your Lyka Realty AI consultant.
+                  Hi! I'm LykAI, your AI Property Concierge from Lyka Realty.
                 </b>
-                Tell me what you're looking for — location, budget, bedrooms — and I'll
-                search 25,000+ UAE properties for you.
+                Tell me what kind of property you're looking for, and I'll help you
+                find the right match.
                 <div className="suggestions" style={{ justifyContent: 'center', marginTop: 20, padding: 0 }}>
                   {SUGGESTIONS.map((s) => (
                     <button key={s} className="suggestion" onClick={() => send(s)}>
@@ -418,10 +518,25 @@ export default function ChatPage() {
             {messages.map((m, i) => (
               <div key={i} className={`msg ${m.role}`}>
                 <div className="avatar" style={{ width: 34, height: 34, fontSize: 13 }}>
-                  {m.role === 'user' ? '🙂' : 'AI'}
+                  {m.role === 'user' ? '🙂' : 'LY'}
                 </div>
                 <div>
                   <div className="bubble">{m.content}</div>
+                  {/* Property cards belong to this reply — part of the answer */}
+                  {m.properties?.length > 0 && (
+                    <div className="msg-cards">
+                      {m.properties.map((p, j) => (
+                        <PropertyCard
+                          key={`${p.property_id}-${j}`}
+                          index={j + 1}
+                          prop={p}
+                          onOpen={(prop) =>
+                            prop.property_id && navigate(`/property/${prop.property_id}`)
+                          }
+                        />
+                      ))}
+                    </div>
+                  )}
                   <div className="meta">
                     {m.language && m.language !== 'en' ? `${m.language} · ` : ''}
                     {m.at ? new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
@@ -432,7 +547,7 @@ export default function ChatPage() {
 
             {typing && (
               <div className="msg assistant">
-                <div className="avatar" style={{ width: 34, height: 34, fontSize: 13 }}>AI</div>
+                <div className="avatar" style={{ width: 34, height: 34, fontSize: 13 }}>LY</div>
                 <div className="bubble">
                   <span className="typing">
                     <i />
@@ -455,26 +570,27 @@ export default function ChatPage() {
             </div>
           )}
 
-          {/* Property rail */}
-          {properties.length > 0 && (
-            <div className="prop-rail">
-              <div className="prop-rail-head">
-                <b>🏠 Recommended properties ({properties.length})</b>
-                <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  click a card for full details
-                </span>
-              </div>
-              <div className="prop-grid">
-                {properties.map((p, i) => (
-                  <PropertyCard
-                    key={`${p.property_id}-${i}`}
-                    prop={p}
-                    onOpen={(prop) =>
-                      prop.property_id && navigate(`/property/${prop.property_id}`)
-                    }
-                  />
-                ))}
-              </div>
+          {/* Listing in focus (came from its details page): one-tap follow-up */}
+          {focus && (
+            <div className="ref-chip">
+              <span className="ref-chip__info">
+                🏡 {focus.property_type || 'Property'}
+                {focus.location ? ` · ${focus.location}` : ''} · Listing #{focus.property_id}
+              </span>
+              <button
+                className="ref-chip__ask"
+                onClick={() => send('Tell me more about this property.')}
+                disabled={typing}
+              >
+                Tell me more about this property
+              </button>
+              <button
+                className="ref-chip__x"
+                aria-label="Dismiss property context"
+                onClick={() => setFocus(null)}
+              >
+                ✕
+              </button>
             </div>
           )}
 
@@ -524,9 +640,9 @@ export default function ChatPage() {
       {voiceMode && (
         <div className="voice-stage">
           <div className={`voice-status`}>
-            {voiceState === 'listening' && 'Listening…'}
-            {voiceState === 'processing' && 'Thinking…'}
-            {voiceState === 'speaking' && 'Speaking…'}
+            {voiceState === 'listening' && 'LykAI is listening…'}
+            {voiceState === 'processing' && 'LykAI is thinking…'}
+            {voiceState === 'speaking' && 'LykAI is speaking…'}
             {voiceState === 'idle' && 'Voice mode'}
           </div>
 
@@ -549,7 +665,7 @@ export default function ChatPage() {
           <div className="voice-log">
             {voiceLog.slice(-6).map((l, i) => (
               <div key={i} className={`v-msg ${l.who === 'me' ? 'me' : ''}`}>
-                <b>{l.who === 'me' ? 'You' : 'AI'}:</b> {l.text}
+                <b>{l.who === 'me' ? 'You' : 'LykAI'}:</b> {l.text}
               </div>
             ))}
           </div>
@@ -583,7 +699,7 @@ export default function ChatPage() {
 
           <p className="voice-hint">
             Speak naturally — “I need a 2 bedroom flat in JVC, budget 1.5 million”.
-            The agent asks one question at a time and remembers your answers.
+            LykAI asks one question at a time and remembers your answers.
           </p>
         </div>
       )}

@@ -1,7 +1,7 @@
 @echo off
-title Lyka Realty - AI Agent + CRM
+title Lyka Realty - LykAI + Agent CRM
 echo ============================================
-echo   Lyka Realty - AI Agent + CRM
+echo   Lyka Realty - LykAI (AI Property Concierge) + Agent CRM
 echo ============================================
 echo.
 
