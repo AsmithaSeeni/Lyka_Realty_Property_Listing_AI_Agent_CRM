@@ -1,0 +1,10 @@
+
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://lyka-realty-property-listing-ai-agent-crm.onrender.com/api/:path*"
+    }
+  ]
+}
