@@ -90,16 +90,27 @@ def _engine_connect_args() -> dict:
     return {}
 
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    # SQLite-only connect args; ignored for any explicitly configured engine.
-    # `timeout` is sqlite3's busy timeout in seconds: a writer waits for a
-    # locked database instead of failing instantly. Kept in sync with
-    # apply_sqlite_pragmas() below (which sets the same value as a PRAGMA so
-    # every connection path agrees).
-    connect_args=_engine_connect_args(),
-    echo=False,
-)
+try:
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URL,
+        connect_args=_engine_connect_args(),
+        echo=False,
+    )
+except Exception as _engine_exc:
+    if "sqlite.libsql" in str(_engine_exc) or "sqlite+libsql" in str(_engine_exc):
+        import logging
+        logging.getLogger(__name__).warning(
+            "sqlalchemy-libsql dialect not available on this platform (%s). "
+            "Using local SQLite fallback for local processes.",
+            _engine_exc,
+        )
+        engine = create_engine(
+            "sqlite:///" + settings.ACTIVE_DB_FILE.as_posix(),
+            connect_args={"check_same_thread": False, "timeout": settings.SQLITE_BUSY_TIMEOUT_SECONDS},
+            echo=False,
+        )
+    else:
+        raise
 
 # ---------------- Phase 9: per-connection SQLite safety contract ----------------
 # SQLite enforces foreign keys OFF by default and SQLAlchemy never turns them

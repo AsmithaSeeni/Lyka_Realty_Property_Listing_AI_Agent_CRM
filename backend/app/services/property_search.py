@@ -332,6 +332,47 @@ def dataset_browse_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def dataset_db_record_dict(prop: Any) -> Dict[str, Any]:
+    """Serialize a database Property row imported from UAErealestate.json.
+
+    Maintains identical normalized schema to dataset_browse_dict:
+    - id: original dataset integer ID (parsed from external_ref 'UAE-<id>' or id)
+    - source: 'dataset'
+    - purpose, price_period, availability: all None (honest representation)
+    - images: [] (never fabricated)
+    - is_demo: False
+    """
+    pid = getattr(prop, "id", None)
+    external_ref = getattr(prop, "external_ref", None) or ""
+    if external_ref.startswith("UAE-"):
+        try:
+            pid = int(external_ref.split("-", 1)[1])
+        except (ValueError, IndexError):
+            pid = getattr(prop, "id", None)
+
+    baths = getattr(prop, "bathrooms", None)
+    return {
+        "id": pid,
+        "source": "dataset",
+        "title": getattr(prop, "title", None) or getattr(prop, "highlights", "") or None,
+        "price": getattr(prop, "price", None),
+        "currency": getattr(prop, "currency", None) or "AED",
+        "purpose": None,
+        "price_period": None,
+        "property_type": getattr(prop, "property_type", None),
+        "bedrooms": getattr(prop, "bedrooms", None),
+        "bathrooms": float(baths) if baths is not None else None,
+        "area": getattr(prop, "area", None),
+        "area_unit": getattr(prop, "area_unit", None) or "sqft",
+        "location": getattr(prop, "location", "") or "",
+        "highlights": getattr(prop, "highlights", "") or "",
+        "images": [],
+        "availability": None,
+        "is_demo": False,
+    }
+
+
+
 # =============================================================================
 # Phase 2: database-backed property queries (foundation for Phase 4 matching)
 # =============================================================================

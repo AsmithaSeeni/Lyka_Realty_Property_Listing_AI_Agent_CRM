@@ -33,6 +33,7 @@ from app.services.property_search import (
     search_property_records,
     public_record_dict,
     dataset_browse_dict,
+    dataset_db_record_dict,
     get_public_record,
     get_public_records,
     record_focus_dict,
@@ -1087,18 +1088,19 @@ def browse_dataset_properties(
     purpose: Optional[Literal["sale", "rent", "lease"]] = None,
     limit: int = Query(24, ge=1, le=48),
     offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
 ):
-    """Browse the 25,082-row UAE dataset with normalized, honest fields.
+    """Browse the UAE dataset with normalized, honest fields.
 
-    Separate from GET /api/properties (approved + available DB inventory):
-    dataset rows are external market data, never Lyka-approved listings, so
-    the payload labels every unknown (purpose, price period, availability)
-    as null and carries source="dataset" so the frontend routes detail and
-    enquiry links into the dataset id space — never the DB one.
+    When imported into Turso / SQLite, this endpoint queries the database
+    with server-side filtering, pagination, and deterministic price ordering.
+    If the database holds zero dataset rows, it falls back seamlessly to
+    the local JSON dataset search.
 
-    `purpose` exists only to REJECT it loudly: the dataset has no sale/rent
-    column, and silently dropping the filter would return the wrong result
-    set. Purpose-filtered browsing stays available on GET /api/properties.
+    Separate from GET /api/properties (approved + available Lyka inventory):
+    dataset rows are unverified reference data, never Lyka-approved listings,
+    so the payload labels unknown governance fields as null and carries
+    source="dataset".
     """
     if purpose is not None:
         raise HTTPException(
@@ -1109,8 +1111,53 @@ def browse_dataset_properties(
                 "purpose-filtered Lyka inventory."
             ),
         )
+
+    # 1. Check if database has imported dataset listings
+    has_db_dataset = (
+        db.query(func.count(Property.id))
+        .filter(Property.source.in_(["uae_dataset", "dataset"]))
+        .scalar()
+        or 0
+    )
+
+    if has_db_dataset > 0:
+        query = db.query(Property).filter(
+            Property.source.in_(["uae_dataset", "dataset"])
+        )
+        if location:
+            query = query.filter(
+                func.lower(Property.location).like(f"%{location.strip().lower()}%")
+            )
+        if property_type:
+            query = query.filter(
+                func.lower(Property.property_type).like(f"%{property_type.strip().lower()}%")
+            )
+        if min_price is not None:
+            query = query.filter(Property.price >= min_price)
+        if max_price is not None:
+            query = query.filter(Property.price <= max_price)
+        if min_bedrooms is not None:
+            query = query.filter(Property.bedrooms >= min_bedrooms)
+        if max_bedrooms is not None:
+            query = query.filter(Property.bedrooms <= max_bedrooms)
+
+        total = query.count()
+        rows = (
+            query.order_by(Property.price.asc(), Property.id.asc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return {
+            "results": [dataset_db_record_dict(p) for p in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    # 2. Fallback to bundled JSON when database has not yet been seeded with dataset rows
     result = search_properties(
-        None,  # dataset search never touches the database
+        None,
         location=location,
         property_type=property_type,
         min_price=min_price,
@@ -1130,12 +1177,34 @@ def browse_dataset_properties(
 
 @app.get("/api/properties/{property_id}")
 async def get_property(property_id: int, db: Session = Depends(get_db)):
-    """Get a specific property by ID."""
+    """Get a specific property by ID (checks database first, then dataset cache)."""
+    # Check DB for dataset row by external_ref (UAE-<id>) or ID
+    db_prop = (
+        db.query(Property)
+        .filter(
+            (Property.external_ref == f"UAE-{property_id}")
+            | (
+                (Property.id == property_id)
+                & Property.source.in_(["uae_dataset", "dataset"])
+            )
+        )
+        .first()
+    )
+    if db_prop:
+        return {
+            "property_id": property_id,
+            "price": f"{int(db_prop.price):,}" if db_prop.price else "",
+            "property_type": db_prop.property_type,
+            "no__of__beds": str(db_prop.bedrooms) if db_prop.bedrooms else "Studio",
+            "no_of_baths": float(db_prop.bathrooms) if db_prop.bathrooms else 1.0,
+            "area": f"{int(db_prop.area):,} sqft" if db_prop.area else "",
+            "highlights": db_prop.highlights or db_prop.title,
+            "location": db_prop.location,
+        }
+
     prop = get_property_by_id(property_id)
-    
     if not prop:
         raise HTTPException(status_code=404, detail="Property not found")
-    
     return prop
 
 

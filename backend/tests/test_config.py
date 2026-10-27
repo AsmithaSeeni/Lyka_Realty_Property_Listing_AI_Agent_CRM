@@ -49,6 +49,8 @@ _PROBE = (
 
 def _probe(cwd, overrides=None, unset=()):
     env = {k: v for k, v in os.environ.items() if k not in unset}
+    for u in unset:
+        env[u] = ""
     env.update(overrides or {})
     env["PYTHONIOENCODING"] = "utf-8"
     # `import app.*` must work regardless of the child process CWD.
