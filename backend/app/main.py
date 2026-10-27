@@ -4,7 +4,7 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import Annotated, Dict, List, Literal, Optional
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, UploadFile, File, Request, Response, Query
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Response, Query
 from fastapi.responses import Response as RawResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
@@ -13,8 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.database import (
     init_db, get_db, SessionLocal,
-    Conversation, Message, Lead, PropertyRecommendation, Customer, Agent,
-    SavedProperty, FollowUp,
+    Conversation, Message, Lead, Property, PropertyRecommendation, Customer,
+    Agent, SavedProperty, FollowUp, AgentRole, AuditLog,
 )
 from app.config import settings
 from app.ai.agent import AIRealEstateAgent, ConversationState
@@ -53,7 +53,14 @@ from app.services.auth import (
     set_agent_cookie, clear_agent_cookie, lead_in_scope, scoped_lead_query,
     find_visitor_customer, set_customer_cookie, clear_customer_cookie,
     reissue_customer_token, claim_guest_conversations,
+    # Global-auth additions (Phase 1/2/5/6)
+    record_login_failure, record_login_success, revoke_all_sessions,
+    load_role_keys, cache_permissions, roles_of, permissions_of,
+    require_authenticated_user, require_roles, require_permissions,
+    ensure_permission, _is_locked,
 )
+from app.services import rbac
+from app.services import audit as auditlog
 from app.services.leads import (
     upsert_lead_from_ai, find_existing_lead, find_duplicate, lead_summary,
     lead_detail, lead_to_extraction, recompute_lead_score,
@@ -61,10 +68,22 @@ from app.services.leads import (
 )
 from app.services.ratelimit import rate_limit
 
-# Initialize database (creates tables, migrates columns, seeds CRM accounts)
-init_db()
-
 logger = logging.getLogger("lyka.api")
+
+# Initialize database (creates tables, migrates columns, seeds CRM accounts).
+# Every route depends on the schema, so a failure here must fail loudly at
+# import time with an actionable hint (captured in Vercel function logs)
+# instead of surfacing as opaque per-request 500s later.
+try:
+    init_db()
+except Exception:
+    logger.exception(
+        "Database initialisation failed - the API cannot start. Verify "
+        "DATABASE_URL (libsql://... for Turso) and TURSO_AUTH_TOKEN in the "
+        "deployment environment; a local SQLite fallback is not usable on a "
+        "read-only serverless filesystem."
+    )
+    raise
 
 # Surface per-turn timing logs (respond(): search/llm ms, NVIDIA chat done)
 # in the console. Without a handler on the "app" package logger these INFO
@@ -363,9 +382,40 @@ PRIORITY_FILTERS = {"high", "medium", "low", "unscored"}
 # API Routes
 
 @app.get("/api/health")
-async def health():
-    """Health check endpoint."""
-    return {"status": "healthy", "message": "LykAI — AI Property Concierge by Lyka Realty is running"}
+def health(db: Session = Depends(get_db)):
+    """Cheap liveness + dependency checks. Never calls an AI provider.
+
+    Always HTTP 200 (liveness); `status` is "healthy" only when every check
+    passes, so a probe can tell "process is up" apart from "database reachable
+    / property data present / providers configured".
+    """
+    checks: Dict[str, object] = {"application": "ok"}
+
+    listings = None
+    try:
+        listings = db.query(func.count(Property.id)).scalar() or 0
+        checks["database"] = "ok"
+    except Exception as e:  # database unreachable — reported, not raised
+        logger.warning("health: database check failed: %s", e)
+        checks["database"] = "error"
+
+    # Dataset parsing is a one-time per-instance cost (~100ms); afterwards
+    # len() is O(1). A missing file logs a warning inside and yields 0 rows.
+    checks["property_data"] = {
+        "dataset_rows": len(load_properties()),
+        "db_listings": listings,
+    }
+    checks["ai_config"] = {
+        "nvidia_configured": bool(os.getenv("NVIDIA_API_KEY", "").strip()),
+        "stt_provider": os.getenv("STT_PROVIDER", "").strip() or None,
+        "tts_provider": os.getenv("TTS_PROVIDER", "").strip() or None,
+    }
+
+    return {
+        "status": "healthy" if checks["database"] == "ok" else "degraded",
+        "message": "LykAI — AI Property Concierge by Lyka Realty is running",
+        "checks": checks,
+    }
 
 
 # ---------------- Voice endpoints ----------------
@@ -1162,6 +1212,10 @@ def customer_login(
         token = reissue_customer_token(db, account)
         if response is not None:
             set_customer_cookie(response, token, max_age_days=30)
+    auditlog.write_audit(
+        db, auditlog.LOGIN_SUCCESS, actor_type="customer", actor_id=account.id,
+        actor_label=account.email, ip=auditlog.client_ip(http_request),
+    )
     return _customer_public(account)
 
 
@@ -1225,7 +1279,6 @@ def customer_saved(
         .order_by(SavedProperty.id.desc())
         .all()
     )
-    by_id = {p.get("property_id"): p for p in load_properties()}
     record_ids = [
         r.property_id - _SAVED_RECORD_ID_BASE
         for r in rows
@@ -1245,7 +1298,7 @@ def customer_saved(
             if rec is not None:
                 results.append(rec)
         else:
-            row = by_id.get(r.property_id)
+            row = get_property_by_id(r.property_id)
             if row is not None:
                 results.append({**row, "source": "dataset"})
     return {"results": results, "total": len(results)}
@@ -1269,10 +1322,7 @@ def customer_save(
             raise HTTPException(status_code=404, detail="Property not found")
         stored_id = _saved_encode_record_id(payload.property_id)
     else:
-        prop = next(
-            (p for p in load_properties() if p.get("property_id") == payload.property_id),
-            None,
-        )
+        prop = get_property_by_id(payload.property_id)
         if prop is None:
             raise HTTPException(status_code=404, detail="Property not found")
         stored_id = payload.property_id
@@ -1340,12 +1390,15 @@ def auth_login(
     payload: LoginRequest,
     db: Session = Depends(get_db),
     response: Response = None,
+    request: Request = None,
     _rl: None = Depends(rate_limit("auth", "AUTH_RATE_LIMIT")),
 ):
     """Authenticate an agent (email OR username + password).
 
     On success sets an httpOnly session cookie and returns the token once for
-    API clients that prefer `Authorization: Bearer <token>`.
+    API clients that prefer `Authorization: Bearer <token>`. The response also
+    carries the identity's roles, permissions and post-login landing route so
+    the global portal can route without a second round-trip.
     """
     identifier = (payload.username or "").strip().lower()
     agent = (
@@ -1356,16 +1409,51 @@ def auth_login(
         )
         .first()
     )
-    # Same generic error for unknown user vs wrong password (no user probing)
-    if agent is None or not agent.is_active or not verify_password(payload.password, agent.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+    # Same generic error for unknown user, wrong password AND a locked account
+    # (no user probing, no lock-detection oracle).
+    generic = HTTPException(status_code=401, detail="Invalid username or password")
+    if agent is None:
+        # Unknown identifier: nothing to track (no row exists).
+        auditlog.write_audit(
+            db, auditlog.LOGIN_FAILURE, actor_type="staff",
+            actor_label=identifier[:255], ip=auditlog.client_ip(request),
+            detail="bad_credentials",
+        )
+        raise generic
+    if _is_locked(agent):
+        auditlog.write_audit(
+            db, auditlog.LOGIN_FAILURE, actor_type="staff", actor_id=agent.id,
+            actor_label=agent.email, ip=auditlog.client_ip(request),
+            detail="locked_out",
+        )
+        raise generic
+    if not agent.is_active or not verify_password(payload.password, agent.password_hash):
+        record_login_failure(db, agent)
+        auditlog.write_audit(
+            db, auditlog.LOGIN_FAILURE, actor_type="staff", actor_id=agent.id,
+            actor_label=agent.email, ip=auditlog.client_ip(request),
+            detail="bad_credentials",
+        )
+        raise generic
 
+    record_login_success(db, agent)
     token = create_session(db, agent)
     set_agent_cookie(response, token)
+    # Resolve the full role/permission set for the portal payload.
+    cache_permissions(db, agent)
+    role_keys = roles_of(agent)
+    auditlog.write_audit(
+        db, auditlog.LOGIN_SUCCESS, actor_type="staff", actor_id=agent.id,
+        actor_label=agent.email, ip=auditlog.client_ip(request),
+        detail=f"roles={','.join(role_keys)}",
+    )
     return {
         "agent": _agent_public(agent),
         "token": token,
         "token_type": "bearer",
+        "roles": rbac.public_role_view(role_keys),
+        "permissions": sorted(permissions_of(agent)),
+        "landing": rbac.landing_for_roles(role_keys),
     }
 
 
@@ -1384,6 +1472,10 @@ def auth_logout(
         token = request.cookies.get(AGENT_COOKIE)
     if token:
         revoke_session(db, token)
+        auditlog.write_audit(
+            db, auditlog.LOGOUT, actor_type="staff",
+            ip=auditlog.client_ip(request),
+        )
     clear_agent_cookie(response)
     return {"ok": True}
 
@@ -1392,6 +1484,551 @@ def auth_logout(
 def auth_me(agent: Agent = Depends(get_current_agent)):
     """Who am I? 401 when unauthenticated — used for route guarding."""
     return {"agent": _agent_public(agent)}
+
+
+@app.get("/api/auth/session")
+def auth_session(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Unified session resolver for the GLOBAL PORTAL (Phase 3).
+
+    Returns whichever identity the browser currently holds — a STAFF session
+    (``lyka_agent_session``) or a CUSTOMER session (``lyka_customer``) — plus
+    that identity's roles, permissions and post-login landing route. This is
+    the single endpoint the frontend AuthContext polls to know "who am I?".
+
+    Never raises for the anonymous case: returns ``{authenticated:false}`` so
+    a logged-out visitor sees the portal, not an error. Authorization itself
+    is still enforced per-request on every protected route (defence in depth).
+    """
+    # ---- staff first (a staff cookie is the more privileged identity) ----
+    staff_token = request.cookies.get(AGENT_COOKIE)
+    if staff_token:
+        try:
+            agent = get_current_agent(request, db)
+        except HTTPException:
+            agent = None  # expired/revoked/disabled — fall through to customer
+        if agent is not None:
+            role_keys = roles_of(agent)
+            return {
+                "authenticated": True,
+                "kind": "staff",
+                "identity": _agent_public(agent),
+                "roles": rbac.public_role_view(role_keys),
+                "permissions": sorted(permissions_of(agent)),
+                "landing": rbac.landing_for_roles(role_keys),
+                "module": rbac.module_for_roles(role_keys),
+            }
+    # ---- customer (registered account or guest) ----
+    customer = find_visitor_customer(db, request)
+    if customer is not None and customer.is_account:
+        return {
+            "authenticated": True,
+            "kind": "customer",
+            "identity": _customer_public(customer),
+            "roles": rbac.public_role_view([rbac.CUSTOMER_ROLE]),
+            "permissions": sorted(rbac.ROLE_REGISTRY[rbac.CUSTOMER_ROLE].permissions),
+            "landing": rbac.CUSTOMER_LANDING,
+            "module": "customer",
+        }
+    return {"authenticated": False, "kind": None, "landing": rbac.CUSTOMER_LANDING}
+
+
+class PortalLoginRequest(BaseModel):
+    identifier: str = Field(..., min_length=1, description="Email or username")
+    password: str = Field(..., min_length=1)
+
+
+@app.post("/api/auth/portal-login")
+def auth_portal_login(
+    payload: PortalLoginRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    response: Response = None,
+    _rl: None = Depends(rate_limit("auth", "AUTH_RATE_LIMIT")),
+):
+    """Unified sign-in for the GLOBAL PORTAL (Phase 3).
+
+    One form, one endpoint: resolves the credential against the STAFF world
+    (agents: email or username) first, then the CUSTOMER world (email). Whichever
+    identity matches gets its own session cookie; the response says which ``kind``
+    signed in plus that identity's roles, permissions and landing route.
+
+    The client supplies NO role — identity, roles and permissions come entirely
+    from the server-side database row. A wrong password and an unknown identifier
+    return the identical generic 401 (no account probing). Lockout and audit are
+    enforced for the staff world; customers reuse the plain login path.
+    """
+    identifier = (payload.identifier or "").strip().lower()
+    generic = HTTPException(status_code=401, detail="Invalid email or password")
+
+    # ---------------- staff world ----------------
+    agent = (
+        db.query(Agent)
+        .filter(
+            (func.lower(Agent.email) == identifier)
+            | (func.lower(Agent.username) == identifier)
+        )
+        .first()
+    )
+    if agent is not None:
+        if _is_locked(agent):
+            auditlog.write_audit(
+                db, auditlog.LOGIN_FAILURE, actor_type="staff", actor_id=agent.id,
+                actor_label=agent.email, ip=auditlog.client_ip(request),
+                detail="locked_out",
+            )
+            raise generic
+        if agent.is_active and verify_password(payload.password, agent.password_hash):
+            record_login_success(db, agent)
+            token = create_session(db, agent)
+            set_agent_cookie(response, token)
+            cache_permissions(db, agent)
+            role_keys = roles_of(agent)
+            auditlog.write_audit(
+                db, auditlog.LOGIN_SUCCESS, actor_type="staff", actor_id=agent.id,
+                actor_label=agent.email, ip=auditlog.client_ip(request),
+                detail=f"roles={','.join(role_keys)}",
+            )
+            return {
+                "authenticated": True,
+                "kind": "staff",
+                "identity": _agent_public(agent),
+                "roles": rbac.public_role_view(role_keys),
+                "permissions": sorted(permissions_of(agent)),
+                "landing": rbac.landing_for_roles(role_keys),
+                "module": rbac.module_for_roles(role_keys),
+                "token": token,
+                "token_type": "bearer",
+            }
+        # Wrong password / inactive on a KNOWN staff account → track + generic.
+        if agent.is_active:
+            record_login_failure(db, agent)
+        auditlog.write_audit(
+            db, auditlog.LOGIN_FAILURE, actor_type="staff", actor_id=agent.id,
+            actor_label=agent.email, ip=auditlog.client_ip(request),
+            detail="bad_credentials",
+        )
+        raise generic
+
+    # ---------------- customer world ----------------
+    # Only accounts (password_hash set) can sign in; guests have no password.
+    account = (
+        db.query(Customer)
+        .filter(Customer.password_hash.isnot(None), Customer.email == identifier)
+        .first()
+    )
+    if account is not None and verify_password(payload.password, account.password_hash):
+        current = find_visitor_customer(db, request) if request else None
+        if current is not None and not current.is_account and current.id != account.id:
+            claim_guest_conversations(db, current, account)
+        token = reissue_customer_token(db, account)
+        if response is not None:
+            set_customer_cookie(response, token, max_age_days=30)
+        auditlog.write_audit(
+            db, auditlog.LOGIN_SUCCESS, actor_type="customer", actor_id=account.id,
+            actor_label=account.email, ip=auditlog.client_ip(request),
+        )
+        return {
+            "authenticated": True,
+            "kind": "customer",
+            "identity": _customer_public(account),
+            "roles": rbac.public_role_view([rbac.CUSTOMER_ROLE]),
+            "permissions": sorted(rbac.ROLE_REGISTRY[rbac.CUSTOMER_ROLE].permissions),
+            "landing": rbac.CUSTOMER_LANDING,
+            "module": "customer",
+        }
+
+    # Unknown in BOTH worlds (or wrong customer password) → one generic error.
+    auditlog.write_audit(
+        db, auditlog.LOGIN_FAILURE, actor_type="system",
+        actor_label=identifier[:255], ip=auditlog.client_ip(request),
+        detail="bad_credentials",
+    )
+    raise generic
+
+
+# ================================================================
+# ADMIN: user provisioning, role management, audit (Phase 5 & 6)
+# ================================================================
+# Every route below is gated by PERMISSIONS (server-side), never by a client
+# -supplied role. High-impact changes (role grant/revoke, suspend, password
+# reset) additionally require the acting admin to re-enter their OWN password
+# (step-up reauthentication) and revoke the target's sessions so an already-open
+# browser loses access immediately.
+
+class StaffCreateRequest(BaseModel):
+    email: str = Field(..., min_length=5)
+    username: str = Field(..., min_length=2)
+    full_name: str = Field(..., min_length=1, max_length=120)
+    password: str = Field(..., min_length=8)
+    role: str = Field(..., description="Primary role key from the registry")
+
+
+class RoleChangeRequest(BaseModel):
+    role: str = Field(..., description="New PRIMARY role key")
+    current_password: str = Field(
+        ..., min_length=1, description="Acting admin's password (step-up check)"
+    )
+
+
+class SuspendRequest(BaseModel):
+    suspend: bool = Field(..., description="true = suspend, false = reactivate")
+    current_password: str = Field(..., min_length=1)
+
+
+class PasswordResetRequest(BaseModel):
+    new_password: str = Field(..., min_length=8)
+    current_password: str = Field(..., min_length=1)
+
+
+def _staff_public(agent: Agent, role_keys) -> dict:
+    """Safe staff representation (never includes password_hash or tokens)."""
+    return {
+        "id": agent.id,
+        "email": agent.email,
+        "username": agent.username,
+        "full_name": agent.full_name,
+        "is_active": agent.is_active,
+        "role": agent.role,
+        "roles": rbac.public_role_view(role_keys),
+        "last_login_at": agent.last_login_at.isoformat() if agent.last_login_at else None,
+        "locked_until": agent.locked_until.isoformat() if agent.locked_until else None,
+        "created_at": agent.created_at.isoformat() if agent.created_at else None,
+    }
+
+
+def _require_step_up(db: Session, actor: Agent, current_password: str) -> None:
+    """Reauthenticate the acting admin before a high-impact change."""
+    if not verify_password(current_password or "", actor.password_hash):
+        raise HTTPException(
+            status_code=403,
+            detail="Password confirmation required for this action",
+        )
+
+
+def _count_active_admins(db: Session, exclude_id: int = None) -> int:
+    """Active staff holding the `admin` role (primary or extra)."""
+    admins = db.query(Agent).filter(Agent.is_active.is_(True)).all()
+    n = 0
+    for a in admins:
+        if exclude_id is not None and a.id == exclude_id:
+            continue
+        if "admin" in load_role_keys(db, a):
+            n += 1
+    return n
+
+
+@app.get("/api/admin/users")
+def admin_list_users(
+    db: Session = Depends(get_db),
+    admin: Agent = Depends(require_permissions("users.read")),
+):
+    """List all staff accounts with their effective roles (users.read)."""
+    rows = db.query(Agent).order_by(Agent.id.asc()).all()
+    return {
+        "total": len(rows),
+        "results": [_staff_public(a, load_role_keys(db, a)) for a in rows],
+    }
+
+
+@app.get("/api/admin/roles")
+def admin_list_roles(
+    admin: Agent = Depends(require_permissions("roles.read", "users.read", mode="any")),
+):
+    """The role registry (keys, display names, module status). No secrets."""
+    return {
+        "roles": [
+            {
+                "key": spec.key,
+                "display_name": spec.display_name,
+                "description": spec.description,
+                "landing": spec.landing,
+                "module": spec.module,
+                "permission_count": len(spec.permissions),
+            }
+            for spec in sorted(rbac.ROLE_REGISTRY.values(), key=lambda s: s.priority)
+        ],
+        "permissions": [
+            {"key": p.key, "description": p.description}
+            for p in sorted(rbac.PERMISSIONS.values(), key=lambda p: p.key)
+        ],
+    }
+
+
+@app.post("/api/admin/users")
+def admin_create_user(
+    payload: StaffCreateRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    admin: Agent = Depends(require_permissions("users.create")),
+):
+    """Create a STAFF account (users.create). Public registration can never
+    reach this route — it lives behind the permission and only ever writes to
+    the `agents` table, never `customers`.
+    """
+    if not rbac.is_known_role(payload.role) or payload.role == rbac.CUSTOMER_ROLE:
+        raise HTTPException(status_code=422, detail="Unknown role")
+    email = payload.email.strip().lower()
+    username = payload.username.strip().lower()
+    if "@" not in email:
+        raise HTTPException(status_code=422, detail="Enter a valid email address")
+    if db.query(Agent).filter(func.lower(Agent.email) == email).first():
+        raise HTTPException(status_code=409, detail="An account with this email exists")
+    if db.query(Agent).filter(func.lower(Agent.username) == username).first():
+        raise HTTPException(status_code=409, detail="This username is taken")
+
+    primary = rbac.normalize_role(payload.role)
+    agent = Agent(
+        email=email,
+        username=username,
+        full_name=payload.full_name.strip(),
+        password_hash=hash_password(payload.password),
+        role=primary,
+        is_active=True,
+    )
+    db.add(agent)
+    db.commit()
+    db.refresh(agent)
+    auditlog.write_audit(
+        db, auditlog.USER_CREATED, actor_type="staff", actor_id=admin.id,
+        actor_label=admin.email, subject_type="staff", subject_id=agent.id,
+        subject_label=agent.email, ip=auditlog.client_ip(request),
+        detail=f"role={primary}",
+    )
+    return {"user": _staff_public(agent, load_role_keys(db, agent))}
+
+
+@app.patch("/api/admin/users/{user_id}/role")
+def admin_change_role(
+    user_id: int,
+    payload: RoleChangeRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    admin: Agent = Depends(require_permissions("roles.manage")),
+):
+    """Change a staff member's PRIMARY role (roles.manage + step-up).
+
+    Extra roles are unaffected. The target's sessions are revoked so the change
+    takes effect on their next request, not at TTL. The LAST active admin can
+    never be demoted.
+    """
+    _require_step_up(db, admin, payload.current_password)
+    target = db.query(Agent).filter(Agent.id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    new_role = rbac.normalize_role(payload.role)
+    if new_role is None or new_role == rbac.CUSTOMER_ROLE:
+        raise HTTPException(status_code=422, detail="Unknown role")
+
+    old_role = target.role
+    # Last-admin protection: demoting the only admin would lock everyone out.
+    if old_role == "admin" and new_role != "admin":
+        if "admin" in load_role_keys(db, target) and _count_active_admins(db, target.id) == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot demote the last active administrator",
+            )
+
+    target.role = new_role
+    db.add(target)
+    db.commit()
+    revoked = revoke_all_sessions(db, target.id)
+    auditlog.write_audit(
+        db, auditlog.ROLE_GRANTED, actor_type="staff", actor_id=admin.id,
+        actor_label=admin.email, subject_type="staff", subject_id=target.id,
+        subject_label=target.email, ip=auditlog.client_ip(request),
+        detail=f"{old_role}->{new_role}; revoked {revoked} session(s)",
+    )
+    return {"user": _staff_public(target, load_role_keys(db, target))}
+
+
+@app.post("/api/admin/users/{user_id}/roles/{role_key}")
+def admin_grant_role(
+    user_id: int,
+    role_key: str,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    admin: Agent = Depends(require_permissions("roles.manage")),
+):
+    """Grant an EXTRA role (roles.manage + step-up). Additive; the primary role
+    in `agents.role` is untouched, so the user keeps working unchanged."""
+    target = db.query(Agent).filter(Agent.id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    key = rbac.normalize_role(role_key)
+    if key is None or key == rbac.CUSTOMER_ROLE:
+        raise HTTPException(status_code=422, detail="Unknown role")
+    exists = (
+        db.query(AgentRole).filter(
+            AgentRole.agent_id == target.id, AgentRole.role_key == key
+        ).first()
+    )
+    if exists is None:
+        db.add(AgentRole(agent_id=target.id, role_key=key))
+        db.commit()
+    auditlog.write_audit(
+        db, auditlog.ROLE_GRANTED, actor_type="staff", actor_id=admin.id,
+        actor_label=admin.email, subject_type="staff", subject_id=target.id,
+        subject_label=target.email, ip=auditlog.client_ip(request),
+        detail=f"extra role {key}",
+    )
+    return {"user": _staff_public(target, load_role_keys(db, target))}
+
+
+@app.delete("/api/admin/users/{user_id}/roles/{role_key}")
+def admin_revoke_role(
+    user_id: int,
+    role_key: str,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    admin: Agent = Depends(require_permissions("roles.manage")),
+):
+    """Revoke an EXTRA role (roles.manage + step-up). The primary role cannot
+    be revoked here — use the role-change endpoint."""
+    target = db.query(Agent).filter(Agent.id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    key = rbac.normalize_role(role_key)
+    if key is None:
+        raise HTTPException(status_code=422, detail="Unknown role")
+    if key == rbac.normalize_role(target.role):
+        raise HTTPException(
+            status_code=409,
+            detail="This is the primary role — change it instead of revoking",
+        )
+    db.query(AgentRole).filter(
+        AgentRole.agent_id == target.id, AgentRole.role_key == key
+    ).delete(synchronize_session=False)
+    db.commit()
+    auditlog.write_audit(
+        db, auditlog.ROLE_REVOKED, actor_type="staff", actor_id=admin.id,
+        actor_label=admin.email, subject_type="staff", subject_id=target.id,
+        subject_label=target.email, ip=auditlog.client_ip(request),
+        detail=f"revoked extra role {key}",
+    )
+    return {"user": _staff_public(target, load_role_keys(db, target))}
+
+
+@app.post("/api/admin/users/{user_id}/suspend")
+def admin_suspend_user(
+    user_id: int,
+    payload: SuspendRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    admin: Agent = Depends(require_permissions("users.suspend")),
+):
+    """Suspend or reactivate a staff account (users.suspend + step-up).
+
+    Suspending revokes every live session immediately. The LAST active admin
+    cannot be suspended. An admin cannot suspend their OWN account."""
+    _require_step_up(db, admin, payload.current_password)
+    target = db.query(Agent).filter(Agent.id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.id == admin.id:
+        raise HTTPException(status_code=409, detail="You cannot suspend your own account")
+
+    if payload.suspend:
+        if "admin" in load_role_keys(db, target) and _count_active_admins(db, target.id) == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot suspend the last active administrator",
+            )
+        target.is_active = False
+        event = auditlog.ACCOUNT_SUSPENDED
+        detail = "suspended"
+    else:
+        target.is_active = True
+        target.failed_login_count = 0
+        target.locked_until = None
+        event = auditlog.ACCOUNT_REACTIVATED
+        detail = "reactivated"
+
+    db.add(target)
+    db.commit()
+    revoked = revoke_all_sessions(db, target.id) if payload.suspend else 0
+    auditlog.write_audit(
+        db, event, actor_type="staff", actor_id=admin.id, actor_label=admin.email,
+        subject_type="staff", subject_id=target.id, subject_label=target.email,
+        ip=auditlog.client_ip(request), detail=f"{detail}; revoked {revoked}",
+    )
+    return {"user": _staff_public(target, load_role_keys(db, target))}
+
+
+@app.post("/api/admin/users/{user_id}/reset-password")
+def admin_reset_password(
+    user_id: int,
+    payload: PasswordResetRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    admin: Agent = Depends(require_permissions("users.update")),
+):
+    """Administratively reset a staff password (users.update + step-up).
+
+    Revokes the target's sessions. This is the ONLY supported recovery path —
+    there is no self-service email reset (no mail transport is configured, and
+    faking one would be dishonest)."""
+    _require_step_up(db, admin, payload.current_password)
+    target = db.query(Agent).filter(Agent.id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    target.password_hash = hash_password(payload.new_password)
+    target.failed_login_count = 0
+    target.locked_until = None
+    db.add(target)
+    db.commit()
+    revoked = revoke_all_sessions(db, target.id)
+    auditlog.write_audit(
+        db, auditlog.PASSWORD_RESET, actor_type="staff", actor_id=admin.id,
+        actor_label=admin.email, subject_type="staff", subject_id=target.id,
+        subject_label=target.email, ip=auditlog.client_ip(request),
+        detail=f"reset; revoked {revoked} session(s)",
+    )
+    return {"ok": True, "revoked_sessions": revoked}
+
+
+@app.get("/api/audit/log")
+def audit_read(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    event: Optional[str] = Query(None, description="Filter by exact event name"),
+    db: Session = Depends(get_db),
+    admin: Agent = Depends(require_permissions("audit.read")),
+):
+    """Read the security audit log (audit.read only). Append-only upstream: no
+    application route can modify or delete these rows."""
+    q = db.query(AuditLog)
+    if event:
+        q = q.filter(AuditLog.event == event)
+    total = q.count()
+    rows = (
+        q.order_by(AuditLog.id.desc()).offset(offset).limit(limit).all()
+    )
+    auditlog.write_audit(
+        db, auditlog.AUDIT_READ, actor_type="staff", actor_id=admin.id,
+        actor_label=admin.email, detail=f"limit={limit}",
+    )
+    return {
+        "total": total,
+        "results": [
+            {
+                "id": r.id,
+                "event": r.event,
+                "actor_type": r.actor_type,
+                "actor_id": r.actor_id,
+                "actor_label": r.actor_label,
+                "subject_type": r.subject_type,
+                "subject_id": r.subject_id,
+                "subject_label": r.subject_label,
+                "ip": r.ip,
+                "detail": r.detail,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
 
 
 # ================================================================
@@ -1407,14 +2044,14 @@ def _scoped_lead_or_404(db: Session, agent: Agent, lead_id: int) -> Lead:
 
 
 def _scoped_conversations(db: Session, agent: Agent):
-    """Conversations visible to this agent.
+    """Conversations visible to this agent (permission-scoped).
 
-    - admin → every conversation
-    - agent → conversations attached to leads in their scope
+    - holds ``conversations.read_all`` (admin, sales manager) → every conversation
+    - otherwise → conversations attached to leads in their scope
       (assigned to them, or unassigned in the shared pool)
     """
     q = db.query(Conversation)
-    if agent.role != "admin":
+    if not rbac.has_permission(agent, "conversations.read_all"):
         rows = scoped_lead_query(db, agent).with_entities(Lead.id).all()
         scoped_lead_ids = [r[0] for r in rows]
         if not scoped_lead_ids:
@@ -1431,7 +2068,7 @@ def _conversation_linkable(db: Session, agent: Agent, conversation: Conversation
     equivalent of the unassigned pickup pool, so any staff agent may claim
     one for a new lead. Returns the conversation or None (404 by caller).
     """
-    if agent.role == "admin":
+    if rbac.has_permission(agent, "conversations.read_all"):
         return conversation
     if conversation.lead_id is None:
         return conversation
@@ -1453,7 +2090,9 @@ def _resolve_agent(db: Session, agent: Agent, target_id: int) -> int:
     target = db.query(Agent).filter(Agent.id == target_id).first()
     if target is None or not target.is_active:
         raise HTTPException(status_code=422, detail="Unknown agent reference")
-    if agent.role != "admin" and target.id != agent.id:
+    # Only holders of leads.assign may assign to someone ELSE; everyone may
+    # always assign/claim for themselves.
+    if target.id != agent.id and not rbac.has_permission(agent, "leads.assign"):
         raise HTTPException(
             status_code=403, detail="Only administrators may assign other agents")
     return target.id
@@ -1880,14 +2519,16 @@ def agent_update_lead(
     if "amenities" in fields and fields["amenities"] is not None:
         fields["amenities"] = json.dumps(fields["amenities"], ensure_ascii=False)
 
-    # Assignment rules (role-based access control)
+    # Assignment rules (permission-based access control)
     if "assigned_agent_id" in fields:
         target = fields["assigned_agent_id"]
         if target is not None:
             target_agent = db.query(Agent).filter(Agent.id == target).first()
             if target_agent is None or not target_agent.is_active:
                 raise HTTPException(status_code=422, detail="Unknown agent")
-            if agent.role != "admin" and target != agent.id:
+            # Only leads.assign holders may assign to another agent; anyone may
+            # always assign to themselves.
+            if target != agent.id and not rbac.has_permission(agent, "leads.assign"):
                 raise HTTPException(
                     status_code=403,
                     detail="Only an admin can assign leads to another agent",
@@ -2287,8 +2928,9 @@ def agent_get_conversation(
     )
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    # Scope: admin sees all; agents see conversations of leads in their scope
-    if agent.role != "admin":
+    # Scope: read_all holders see everything; others see conversations of
+    # leads in their scope
+    if not rbac.has_permission(agent, "conversations.read_all"):
         if conv.lead_id is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
         _scoped_lead_or_404(db, agent, conv.lead_id)

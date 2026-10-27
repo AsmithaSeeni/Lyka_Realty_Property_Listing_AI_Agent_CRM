@@ -35,11 +35,14 @@ def _get_client() -> httpx.Client:
     """Shared HTTP client (module-level, lazily created, thread-tolerant)."""
     global _CLIENT
     if _CLIENT is None or _CLIENT.is_closed:
-        # 120s read: the Tamil/thinking path legitimately takes 20-60s when the
-        # upstream queue is busy (measured 18-74s); anything beyond that falls
-        # back to a canned reply instead of hanging the request.
+        # Serverless-safe bounds: vercel.json caps the backend function at 30s
+        # (maxDuration), so a 25s read keeps the worst case (one non-retried
+        # read timeout, or a fast 5xx plus its single retry) inside the
+        # function budget — customers get the honest fallback instead of a
+        # killed invocation. Connect stays short because connect errors ARE
+        # retried once, and two connect timeouts (2x8s) also fit the budget.
         _CLIENT = httpx.Client(
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            timeout=httpx.Timeout(25.0, connect=8.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
     return _CLIENT
@@ -348,29 +351,20 @@ class NVIDIAClient:
         return stripped
 
     def _fallback_response(self, user_message: str, language: str = "auto") -> str:
-        """Fallback response when API is unavailable (in the reply language)."""
+        """Honest outage message used when the provider cannot answer.
+
+        This is deliberately NOT a substitute AI reply: it never greets,
+        never asks a follow-up question and never fabricates listings — it
+        says the assistant is unavailable right now and asks the customer to
+        retry, in the reply language. (`user_message` is kept in the
+        signature for call-site compatibility.)
+        """
         if language in ("ta", "mixed", "ta-Latn"):
             return (
-                "நான் LykAI, உங்கள் சொத்து உதவியாளர். எந்த இடத்திற்கு, எவ்வளவு "
-                "பட்ஜெட்டில், எத்தனை பெட்ரூம் வேண்டும் என்று சொல்லுங்கள். உங்களுக்கு ஏற்ற சொத்துக்களைத் தேடி தருகிறேன்."
+                "LykAI-ஐ அணுக இப்போது முடியவில்லை. சிறிது நேரம் கழித்து "
+                "மீண்டும் முயற்சிக்கவும்."
             )
-        msg = user_message.lower().strip()
-        if any(word in msg for word in ["hello", "hi", "hey"]):
-            return (
-                "Hi! I'm LykAI, your AI property concierge from Lyka Realty. "
-                "I can help you find properties in the UAE - what are you "
-                "looking for?"
-            )
-        elif "thank" in msg or "thanks" in msg:
-            return "You're welcome! Is there anything else I can help you with?"
-        elif "bye" in msg or "goodbye" in msg:
-            return (
-                "Goodbye! Feel free to reach out whenever you're ready to "
-                "find your next property."
-            )
-        else:
-            return (
-                "I'd be happy to help you find a property! Could you tell me "
-                "more about what you're looking for - location, budget, and "
-                "the number of bedrooms?"
-            )
+        return (
+            "LykAI is having trouble reaching its service right now, so I can't "
+            "search listings at the moment. Please try again in a little while."
+        )

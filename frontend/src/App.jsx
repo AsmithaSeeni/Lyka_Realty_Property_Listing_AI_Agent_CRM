@@ -5,10 +5,12 @@ import ChatPage from './pages/ChatPage.jsx'
 import ConversationHistory from './pages/ConversationHistory.jsx'
 import PropertyDetails from './pages/PropertyDetails.jsx'
 import PropertiesPage from './pages/PropertiesPage.jsx'
-import CustomerAuth from './pages/CustomerAuth.jsx'
+import GlobalLogin from './pages/GlobalLogin.jsx'
+import ModulePlaceholder from './pages/ModulePlaceholder.jsx'
 import SavedProperties from './pages/SavedProperties.jsx'
 import Profile from './pages/Profile.jsx'
-import LoginPage from './pages/LoginPage.jsx'
+import { AuthProvider } from './auth/AuthContext.jsx'
+import { ProtectedRoute, AccessDenied } from './auth/ProtectedRoute.jsx'
 import { RequireAgent } from './agent/AgentAuth.jsx'
 import AgentShell from './agent/AgentShell.jsx'
 import AgentDashboard from './agent/AgentDashboard.jsx'
@@ -113,7 +115,7 @@ function Footer() {
           </Link>
           <p>
             Helping people buy, rent and invest in Dubai property with clarity and
-            care — no pressure, no confusion. Founded 2024, 300+ clients served.
+            care. Founded 2024.
           </p>
         </div>
 
@@ -181,14 +183,31 @@ function ChatFooter() {
 }
 
 export default function App() {
+  return (
+    <AuthProvider>
+      <AppRoutes />
+    </AuthProvider>
+  )
+}
+
+function AppRoutes() {
   const location = useLocation()
   // Chat is a full-screen app view: slim pinned footer so the composer and
   // footer are both always visible. Every other public page gets the full footer.
   const isChat = location.pathname.startsWith('/chat')
   // The staff CRM (login + protected routes) has its own dedicated chrome —
   // the public marketing header/footer must never wrap internal screens.
-  // Customer sign-in (/login, /register) keeps the normal customer chrome.
-  const isAgentArea = location.pathname.startsWith('/agent')
+  // The global portal (/login, /register) also keeps its own full-bleed layout.
+  const isAgentArea =
+    location.pathname.startsWith('/agent') ||
+    location.pathname.startsWith('/hr') ||
+    location.pathname.startsWith('/payroll') ||
+    location.pathname.startsWith('/operations') ||
+    location.pathname.startsWith('/finance') ||
+    location.pathname.startsWith('/properties/manage') ||
+    location.pathname === '/login' ||
+    location.pathname === '/register' ||
+    location.pathname === '/signin'
 
   // Fresh pages always start at the top (skips smooth-scroll for instant jump)
   React.useEffect(() => {
@@ -215,15 +234,20 @@ export default function App() {
         <Route path="/properties" element={<PropertiesPage />} />
         <Route path="/property/:id" element={<PropertyDetails />} />
         <Route path="/properties/:id" element={<PropertyDetails />} />
-        {/* Optional customer accounts — sign-in and registration */}
-        <Route path="/login" element={<CustomerAuth />} />
-        <Route path="/register" element={<CustomerAuth />} />
-        {/* Legacy alias for old sign-in links */}
-        <Route path="/signin" element={<CustomerAuth />} />
 
-        {/* ---------- Staff CRM (separate portal, separate session) ---------- */}
-        <Route path="/agent/login" element={<LoginPage />} />
-        <Route path="/crm" element={<Navigate to="/agent/login" replace />} />
+        {/* ---------- ONE global login portal (all roles) ---------- */}
+        {/* /login, /register and the legacy /signin alias all render the single
+            GlobalLogin portal. Registration remains a customer-only mode. */}
+        <Route path="/login" element={<GlobalLogin />} />
+        <Route path="/register" element={<GlobalLogin />} />
+        <Route path="/signin" element={<GlobalLogin />} />
+
+        {/* Legacy staff entry points redirect into the same portal so there is
+            exactly one sign-in surface. */}
+        <Route path="/agent/login" element={<Navigate to="/login" replace />} />
+        <Route path="/crm" element={<Navigate to="/login" replace />} />
+
+        {/* ---------- Staff CRM (real, permission-gated) ---------- */}
         <Route path="/agent" element={<RequireAgent />}>
           <Route index element={<Navigate to="/agent/dashboard" replace />} />
           <Route path="dashboard" element={<AgentShell />}>
@@ -238,6 +262,52 @@ export default function App() {
             <Route index element={<AgentConversations />} />
           </Route>
         </Route>
+
+        {/* ---------- Roles whose modules are NOT built yet ----------
+            Genuine permission scaffolding + an honest "not yet implemented"
+            dashboard. No fabricated HR/payroll data is ever shown. */}
+        <Route
+          path="/hr/dashboard"
+          element={
+            <ProtectedRoute>
+              <ModulePlaceholder path="/hr/dashboard" />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/payroll/dashboard"
+          element={
+            <ProtectedRoute>
+              <ModulePlaceholder path="/payroll/dashboard" />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/operations/dashboard"
+          element={
+            <ProtectedRoute>
+              <ModulePlaceholder path="/operations/dashboard" />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/finance/dashboard"
+          element={
+            <ProtectedRoute>
+              <ModulePlaceholder path="/finance/dashboard" />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/properties/manage"
+          element={
+            <ProtectedRoute>
+              <ModulePlaceholder path="/properties/manage" />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route path="/access-denied" element={<AccessDenied />} />
 
         <Route path="*" element={<LandingPage />} />
       </Routes>

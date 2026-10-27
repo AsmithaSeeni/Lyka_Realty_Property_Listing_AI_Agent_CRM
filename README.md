@@ -25,7 +25,6 @@ Backend: FastAPI + SQLAlchemy + SQLite. Frontend: React + Vite.
 ```
 lyka_property_agent2/
 ├── .env                       # All API keys (never exposed to the frontend)
-├── UAErealestate.json         # Property dataset (25,082 listings)
 ├── lyka_logo.png
 ├── start.bat                  # One-click startup (Windows)
 │
@@ -398,6 +397,53 @@ Root causes and fixes:
   to someone else. Invalid statuses are rejected with `422`.
 - **No secrets in the frontend** — all API keys live in `.env` on the server.
 
+### Global login & enterprise RBAC (added)
+
+One portal signs in every role (System Administrator, HR, Payroll, Real Estate
+Agent, Sales Manager, Operations, Finance, Property Manager, Support, Customer).
+
+- **Single entry point** — `/login` (also `/register`, legacy `/signin`) renders
+  one portal. One form authenticates a **staff** account (email *or* username)
+  or a **customer** account (email); the backend resolves which world the
+  credential belongs to. `/agent/login` and `/crm` redirect here. There is **no
+  role selector** — identity, roles and permissions come from the database,
+  never from the client.
+- **Unified session** — `GET /api/auth/session` returns the current identity
+  (staff *or* customer) plus its roles, permissions and landing route;
+  `{authenticated:false}` when anonymous. `POST /api/auth/portal-login` is the
+  single submit endpoint (identical generic `401` for wrong password vs unknown
+  account).
+- **Central permission registry** — `backend/app/services/rbac.py`. Roles group
+  permissions; permissions gate actions. The eight hard-coded
+  `agent.role == "admin"` checks were replaced by permission checks with
+  identical `404`/`403` behaviour. Reusable dependencies:
+  `require_roles(...)`, `require_permissions(...)`, `ensure_permission(...)`.
+  Multi-role is supported (`agent_roles` table; primary role stays in
+  `agents.role`). Default landing: lowest-priority-number role wins.
+- **Account lockout** — after `LOGIN_LOCKOUT_THRESHOLD` (default 8) consecutive
+  failures on one existing account, locked for `LOGIN_LOCKOUT_MINUTES` (default
+  15). Generic error either way (no lock oracle); counters reset on success.
+- **Session revocation** — suspend, role change and admin password reset call
+  `revoke_all_sessions()` so an open browser loses access immediately.
+- **Provisioning & role management** — permission-gated `/api/admin/*` routes
+  (`users.read/create/update/suspend`, `roles.read/manage`) with step-up
+  password confirmation for high-impact changes, last-admin protection, and
+  self-suspend prevention. Public registration can only ever create a *customer*
+  account.
+- **Audit log** — append-only `audit_log` table (login success/failure, logout,
+  role change, suspension, staff creation, password reset). No route can modify
+  or delete rows; reading needs `audit.read`. Passwords/tokens/bodies are never
+  stored.
+- **Honest scope** — HR, Payroll, Operations, Finance and Property-Manager
+  *modules are not built*; those roles land on a clearly-labelled "not yet
+  implemented" dashboard. **No employee, salary, payslip or attendance data is
+  fabricated or stored.** Self-service password reset and MFA are **not**
+  implemented (no mail transport / no TOTP); the supported recovery path is an
+  audited administrator reset.
+
+See `docs/GLOBAL_AUTH_AUDIT.md` (Phase 0 findings) and
+`docs/GLOBAL_AUTH_IMPLEMENTATION.md` (what was built + limitations).
+
 ### Phase 1 hardening (added)
 
 - **Rate limiting** — in-memory sliding-window limiter on the expensive
@@ -451,7 +497,8 @@ Root causes and fixes:
   - Migrations run automatically at app startup (`init_db`), or manually via
     `python -c "from app.database import init_db; init_db()"` from `backend/`.
 - **Dataset boundary (important)** — the 25,082-row `UAErealestate.json`
-  dataset is **unchanged** and is **never** imported into `properties`, never
+  dataset (kept in `backend/` so the deployed Vercel function ships with it)
+  is **unchanged** and is **never** imported into `properties`, never
   assumed sale/rent/approved/available, and never sent whole to an LLM. The
   existing chat search (`search_properties`) is untouched; the new
   `search_property_records()` queries only the `properties` table with hard

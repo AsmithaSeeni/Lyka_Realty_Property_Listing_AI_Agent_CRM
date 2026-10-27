@@ -20,6 +20,22 @@ from app.config import settings
 # No schema/engine migration happens here.
 SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
 
+# Production must be told WHERE to persist. On serverless hosts the local
+# filesystem is read-only and ephemeral, so silently defaulting to a SQLite
+# file turns into an opaque "attempt to write a readonly database" failure
+# at the first query. Fail fast, at import time, naming the missing
+# configuration instead (dev/test are unaffected: they run APP_ENV
+# development/test and keep the SQLite default).
+if (
+    settings.APP_ENV.strip().lower() == "production"
+    and not str(SQLALCHEMY_DATABASE_URL or "").strip()
+):
+    raise RuntimeError(
+        "APP_ENV=production but DATABASE_URL is empty. Production needs an "
+        "explicit persistent database (e.g. libsql://<db-name>.turso.io with "
+        "TURSO_AUTH_TOKEN); configure both in the deployment environment."
+    )
+
 # ---------------- Serverless / Turso (libSQL) support ----------------
 # Vercel Functions have a READ-ONLY, ephemeral filesystem: a local SQLite file
 # cannot persist there (every cold start would start empty and each concurrent
@@ -30,22 +46,47 @@ SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
 # The auth token is read from the environment (TURSO_AUTH_TOKEN) and passed via
 # connect_args rather than embedded in the URL, so it can never leak into logs,
 # error messages or repr(engine).
-_IS_LIBSQL = SQLALCHEMY_DATABASE_URL.startswith(("libsql://", "https://", "http://"))
+#
+# sqlalchemy-libsql==0.2.0 registers ONLY the `sqlite+libsql` and
+# `sqlite+aiolibsql` dialects (verified from the wheel's entry_points.txt);
+# a bare `libsql://` / `https://` / `http://` scheme has NO registered
+# dialect and would crash create_engine() at import. app.config keeps those
+# operator-facing forms working by normalising them to `sqlite+libsql://...`
+# — every prefix that must take the libSQL path (raw or normalised) is
+# listed here.
+_LIBSQL_URL_PREFIXES = ("libsql://", "https://", "http://", "sqlite+libsql", "sqlite+aiolibsql")
+_IS_LIBSQL = SQLALCHEMY_DATABASE_URL.startswith(_LIBSQL_URL_PREFIXES)
+
+
+def _is_local_sqlite(url: str) -> bool:
+    """True only for the LOCAL SQLite dialect.
+
+    The Phase 9 PRAGMA contract (foreign_keys / busy_timeout / journal_mode)
+    and the SQLite-only connect args apply to local files — never to libSQL
+    remotes, whose URL also begins with ``sqlite+libsql://`` after the
+    config-layer normalisation above.
+    """
+    return url.startswith("sqlite") and not url.startswith(
+        ("sqlite+libsql", "sqlite+aiolibsql")
+    )
 
 
 def _engine_connect_args() -> dict:
     """Per-scheme connect args. SQLite keeps its Phase 1/9 contract; libSQL
     receives its auth token. Every other dialect gets no extra args."""
-    if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
-        return {
-            "check_same_thread": False,
-            "timeout": settings.SQLITE_BUSY_TIMEOUT_SECONDS,
-        }
-    if _IS_LIBSQL:
+    if SQLALCHEMY_DATABASE_URL.startswith(_LIBSQL_URL_PREFIXES):
+        # libSQL FIRST: the normalised `sqlite+libsql://...` form ALSO starts
+        # with "sqlite" — falling into the SQLite-only branch would silently
+        # drop the auth token remote Turso requires.
         args = {}
         if settings.TURSO_AUTH_TOKEN:
             args["auth_token"] = settings.TURSO_AUTH_TOKEN
         return args
+    if _is_local_sqlite(SQLALCHEMY_DATABASE_URL):
+        return {
+            "check_same_thread": False,
+            "timeout": settings.SQLITE_BUSY_TIMEOUT_SECONDS,
+        }
     return {}
 
 
@@ -105,13 +146,15 @@ def apply_sqlite_pragmas(dbapi_connection) -> None:
         cursor.close()
 
 
-if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+if _is_local_sqlite(SQLALCHEMY_DATABASE_URL):
     from sqlalchemy import event
 
     @event.listens_for(engine, "connect")
     def _sqlite_connection_pragmas(dbapi_connection, _connection_record):
         # Registered before init_db() can run, so even the very first
         # connection (create_all/migrations/seeding) gets the contract.
+        # Never registered for libSQL remotes: applying local-filesystem
+        # PRAGMAs over a remote Turso connection is not part of its contract.
         apply_sqlite_pragmas(dbapi_connection)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -130,7 +173,14 @@ def _sha256(value: str) -> str:
 # ---------------------------------------------------------------- Agent side
 
 class Agent(Base):
-    """Internal sales agent (CRM user). Passwords are bcrypt hashes only."""
+    """Internal sales agent (CRM user). Passwords are bcrypt hashes only.
+
+    ``role`` is the PRIMARY role (legacy column, kept authoritative on its own
+    so every existing query keeps working). Additional roles live in
+    ``agent_roles``; together they form the identity's effective role set
+    (see services.rbac.effective_roles). ``role`` always stays populated with
+    the winning role so old readers see a sensible value.
+    """
     __tablename__ = "agents"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -138,12 +188,26 @@ class Agent(Base):
     username = Column(String, unique=True, nullable=False, index=True)
     full_name = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)   # bcrypt, never plaintext
-    role = Column(String, nullable=False, default="agent")  # "admin" | "agent"
+    role = Column(String, nullable=False, default="agent")  # primary role key
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # ---------------- Global-auth additions (additive, nullable) ----------
+    # Last successful sign-in (never set for guests). NULL = never logged in
+    # through the portal yet, or a pre-migration row.
+    last_login_at = Column(DateTime, nullable=True)
+    # Consecutive failed sign-ins since the last success. Reset to 0 on a
+    # successful login. Purely a counter — no passwords/timestamps of failures.
+    failed_login_count = Column(Integer, nullable=False, default=0)
+    # When set (and in the future) the account is temporarily locked after too
+    # many consecutive failures. NULL = not locked.
+    locked_until = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     sessions = relationship("AgentSession", backref="agent", cascade="all, delete-orphan")
     assigned_leads = relationship("Lead", backref="assigned_agent", lazy="selectin")
+    role_assignments = relationship(
+        "AgentRole", backref="agent", cascade="all, delete-orphan", lazy="selectin"
+    )
 
 
 class AgentSession(Base):
@@ -168,6 +232,60 @@ class AgentSession(Base):
     @staticmethod
     def new_token() -> str:
         return secrets.token_urlsafe(32)
+
+
+class AgentRole(Base):
+    """Additional role assignments for a staff identity (Phase 2 — multi-role).
+
+    The PRIMARY role lives in ``agents.role`` and is authoritative on its own.
+    This table only ever holds EXTRA roles, so a staff member with a single
+    role has zero rows here and behaves exactly as before. The combination is
+    de-duplicated and normalised in services.rbac.effective_roles().
+
+    ``role_key`` is validated against the rbac.ROLE_REGISTRY before insert, and
+    a UNIQUE constraint is the database-level backstop against duplicates.
+    """
+    __tablename__ = "agent_roles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    # A registry key, e.g. "sales_manager". Never a permission string.
+    role_key = Column(String, nullable=False)
+    granted_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        # One row per (agent, role) — re-granting the same role is a no-op.
+        UniqueConstraint("agent_id", "role_key", name="uq_agent_roles_agent_role"),
+    )
+
+
+class AuditLog(Base):
+    """Append-only security audit trail (Phase 6).
+
+    Written only through services.audit.write_audit(). There is no application
+    API to update or delete rows. Sensitive values (passwords, tokens, cookies,
+    message bodies) are never stored — see the module docstring in
+    services/audit.py for the enforced data-minimisation rules.
+    """
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event = Column(String, nullable=False, index=True)      # e.g. "auth.login.success"
+    # "staff" | "customer" | "system" — who performed the action.
+    actor_type = Column(String, nullable=False, default="system")
+    actor_id = Column(Integer, nullable=True)               # id within actor_type space
+    actor_label = Column(String, nullable=True)             # email/username (no secrets)
+    subject_type = Column(String, nullable=True)            # what was acted upon
+    subject_id = Column(Integer, nullable=True)
+    subject_label = Column(String, nullable=True)
+    ip = Column(String, nullable=True)
+    detail = Column(String, nullable=True)                  # short, non-sensitive note
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_audit_log_event_created", "event", "created_at"),
+        Index("ix_audit_log_actor", "actor_type", "actor_id"),
+    )
 
 
 class Customer(Base):
@@ -485,6 +603,16 @@ _MIGRATIONS = {
     ],
     "customers": [
         ("password_hash", "VARCHAR"),
+    ],
+    # ---------------- Global auth (additive; every column nullable/defaulted) ---
+    # No row is deleted or rewritten; existing staff keep working unchanged.
+    "agents": [
+        ("last_login_at", "DATETIME"),
+        # NOT NULL with a default: SQLite ADD COLUMN supports this, and the
+        # backfill sets existing rows to 0 (never a fabricated login).
+        ("failed_login_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("locked_until", "DATETIME"),
+        ("updated_at", "DATETIME"),
     ],
 }
 

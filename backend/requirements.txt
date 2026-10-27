@@ -16,7 +16,10 @@ edge-tts>=7.0.0
 # ---------------- Serverless database (Turso / libSQL) ----------------
 # Only needed when DATABASE_URL is a libSQL URL (e.g. Vercel). A local SQLite
 # deployment never opens a connection through it, but it must be present at
-# deploy time or the libsql:// dialect will not resolve.
+# deploy time the sqlite+libsql dialect will not resolve. Bare `libsql://` /
+# `https://` DSNs from the Turso CLI are normalised to it in
+# app.config._database_url (the package registers only entry point
+# "sqlite.libsql", never a top-level "libsql" scheme).
 #
 # PLATFORM NOTE (verified 2026-10): sqlalchemy-libsql and its libsql-experimental
 # dependency ship wheels for Linux and macOS ONLY — there is no Windows wheel,

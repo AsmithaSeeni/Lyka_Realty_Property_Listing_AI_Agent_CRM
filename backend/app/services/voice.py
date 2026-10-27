@@ -7,7 +7,6 @@ Providers/models/keys are read from .env:
 """
 import os
 import logging
-import tempfile
 from typing import Optional
 
 import httpx
@@ -19,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 # Accept common browser audio extensions
 ALLOWED_EXTENSIONS = {".webm", ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".mp4"}
+
+# Provider call budget: the backend runs under a 30s serverless function cap
+# (vercel.json maxDuration), so provider HTTP calls get a 25s ceiling — a hung
+# provider surfaces as a clean 502 instead of a killed invocation.
+_PROVIDER_TIMEOUT_SECONDS = 25.0
 
 
 def _stt_config():
@@ -108,7 +112,7 @@ async def _transcribe_groq(model, api_key, audio_bytes, filename, ext, language)
         data["language"] = {"en": "en", "ta": "ta", "ta-Latn": "ta"}.get(language, language)
     files = {"file": (f"recording{ext}", audio_bytes, "application/octet-stream")}
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=_PROVIDER_TIMEOUT_SECONDS) as client:
         resp = await client.post(url, headers=headers, data=data, files=files)
         resp.raise_for_status()
         result = resp.json()
@@ -124,7 +128,7 @@ async def _transcribe_openai_compatible(base_url, model, api_key, audio_bytes, f
         data["language"] = {"en": "en", "ta": "ta", "ta-Latn": "ta"}.get(language, language)
     files = {"file": (f"recording{ext}", audio_bytes, "application/octet-stream")}
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=_PROVIDER_TIMEOUT_SECONDS) as client:
         resp = await client.post(url, headers=headers, data=data, files=files)
         resp.raise_for_status()
         result = resp.json()
@@ -233,7 +237,7 @@ async def _tts_sarvam(api_key: str, model: str, voice: str, text: str, language:
         "enable_preprocessing": True,
         "model": model or "bulbul:v1",
     }
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=_PROVIDER_TIMEOUT_SECONDS) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
@@ -252,7 +256,7 @@ async def _transcribe_sarvam(api_key: str, model: str, audio_bytes: bytes, filen
         "model": model or "saaras:v1",
         "language_code": "ta-IN" if language in ("ta", "ta-IN") else "unknown",
     }
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=_PROVIDER_TIMEOUT_SECONDS) as client:
         resp = await client.post(url, headers=headers, data=data, files=files)
         resp.raise_for_status()
         result = resp.json()
@@ -275,7 +279,7 @@ async def _tts_openai_compatible(base_url, model, api_key, voice, text, language
     if language in ("ta", "ta-Latn", "en"):
         payload["language"] = {"ta-Latn": "ta"}.get(language, language)
 
-    async with httpx.AsyncClient(timeout=90.0) as client:
+    async with httpx.AsyncClient(timeout=_PROVIDER_TIMEOUT_SECONDS) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         return resp.content

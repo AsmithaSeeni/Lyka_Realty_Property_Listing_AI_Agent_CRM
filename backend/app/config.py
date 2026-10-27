@@ -95,9 +95,24 @@ ACTIVE_DB_FILE = BACKEND_DIR / "real_estate.db"
 
 def _database_url() -> str:
     explicit = _env("DATABASE_URL", "")
-    if explicit:
-        return explicit
-    return "sqlite:///" + ACTIVE_DB_FILE.as_posix()
+    if not explicit:
+        return "sqlite:///" + ACTIVE_DB_FILE.as_posix()
+    # Turso/libSQL URL normalisation. sqlalchemy-libsql==0.2.0 registers ONLY
+    # the `sqlite+libsql` / `sqlite+aiolibsql` dialects (wheel entry_points:
+    # "sqlite.libsql", "sqlite.aiolibsql") — a raw `libsql://`, `https://` or
+    # `http://` DSN (the exact forms the Turso CLI prints and our docs give)
+    # would make create_engine() fail at import with "Did not find a dialect
+    # named ...". Operators keep writing the documented forms; they are
+    # rewritten to the registered dialect here, adding the transport flag
+    # Turso's own docs use unless the URL already carries a query string.
+    if explicit.startswith(("libsql://", "https://", "http://")):
+        scheme, rest = explicit.split("://", 1)
+        secure = "false" if scheme == "http" else "true"
+        url = "sqlite+libsql://" + rest
+        if "?" not in rest:
+            url += "?secure=" + secure
+        return url
+    return explicit
 
 
 class Settings:
@@ -179,6 +194,15 @@ class Settings:
     # httpOnly + SameSite=Lax are set in code; Secure flips on automatically
     # for production (HTTPS) and can be forced with COOKIE_SECURE=true.
     COOKIE_SECURE: bool = _bool("COOKIE_SECURE", APP_ENV.lower() == "production")
+
+    # ---------------- Account lockout (global auth, Phase 6)
+    # After N CONSECUTIVE failed sign-ins on one existing account, lock it for
+    # M minutes. Counters reset on a successful login. A locked account gets
+    # the same generic error as a wrong password (no lock-detection oracle).
+    # This brakes targeted password-spraying; the per-IP auth rate limit
+    # already damps request volume. Set LOGIN_LOCKOUT_THRESHOLD=0 to disable.
+    LOGIN_LOCKOUT_THRESHOLD: int = _int("LOGIN_LOCKOUT_THRESHOLD", 8)
+    LOGIN_LOCKOUT_MINUTES: int = _int("LOGIN_LOCKOUT_MINUTES", 15)
 
     # ---------------- Serverless database (Turso / libSQL)
     # Only read when DATABASE_URL is a libSQL URL. Kept OUT of the URL string

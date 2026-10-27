@@ -17,7 +17,7 @@ from app.services.property_search import (
 )
 
 _BACKEND = pathlib.Path(__file__).resolve().parents[1]
-DATASET_JSON = _BACKEND.parent / "UAErealestate.json"
+DATASET_JSON = _BACKEND / "UAErealestate.json"  # ships inside the backend/ service root
 
 
 def _mk(db, **kw):

@@ -1,11 +1,15 @@
 import React from 'react'
 import { NavLink, useLocation, Outlet } from 'react-router-dom'
 import { useAgent } from './AgentAuth.jsx'
+import { useAuth, hasPerm } from '../auth/AuthContext.jsx'
 
+/* Navigation is filtered by PERMISSIONS (render-time UX only — the backend
+   re-checks on every request). A user only sees the sections their roles
+   actually unlock. */
 const NAV = [
-  { to: '/agent/dashboard', icon: '▦', label: 'Dashboard' },
-  { to: '/agent/leads', icon: '◉', label: 'Leads' },
-  { to: '/agent/conversations', icon: '💬', label: 'Conversations' },
+  { to: '/agent/dashboard', icon: '▦', label: 'Dashboard', perm: 'leads.read_assigned' },
+  { to: '/agent/leads', icon: '◉', label: 'Leads', perm: 'leads.read_assigned' },
+  { to: '/agent/conversations', icon: '💬', label: 'Conversations', perm: 'conversations.read_authorized' },
 ]
 
 const TITLES = [
@@ -23,9 +27,21 @@ const TITLES = [
  */
 export default function AgentShell() {
   const { agent, logout } = useAgent()
+  const { roles, permissions } = useAuth()
   const location = useLocation()
 
   const heading = TITLES.find((t) => location.pathname.startsWith(t.match)) || TITLES[0]
+
+  // Only render nav items whose permission the session actually holds.
+  const visibleNav = NAV.filter((n) => !n.perm || hasPerm({ permissions }, n.perm))
+
+  // Human-readable role label(s) from the resolved session roles.
+  const roleLabel =
+    roles && roles.length
+      ? roles.map((r) => r.display_name).join(' · ')
+      : agent?.role === 'admin'
+        ? 'Administrator'
+        : 'Sales agent'
 
   return (
     <div className="ax">
@@ -41,7 +57,7 @@ export default function AgentShell() {
         </div>
 
         <nav className="ax-nav">
-          {NAV.map((n) => (
+          {visibleNav.map((n) => (
             <NavLink
               key={n.to}
               to={n.to}
@@ -58,7 +74,7 @@ export default function AgentShell() {
             <div className="ax-me__avatar">{(agent?.full_name || 'A').slice(0, 1).toUpperCase()}</div>
             <div className="ax-me__meta">
               <b>{agent?.full_name}</b>
-              <span>{agent?.role === 'admin' ? 'Administrator' : 'Sales agent'} · {agent?.email}</span>
+              <span>{roleLabel} · {agent?.email}</span>
             </div>
           </div>
           <button className="ax-logout" onClick={logout}>⇄ Sign out</button>
@@ -73,7 +89,9 @@ export default function AgentShell() {
             <p>{heading.sub}</p>
           </div>
           <div className="ax-top__right">
-            <span className="ax-chip">{agent?.role === 'admin' ? 'Admin' : 'Agent'}</span>
+            <span className="ax-chip">
+              {roles && roles.length ? roles[0].display_name : agent?.role === 'admin' ? 'Admin' : 'Agent'}
+            </span>
             <NavLink to="/chat" className="ax-top__link" target="_blank">View public site ↗</NavLink>
           </div>
         </header>
