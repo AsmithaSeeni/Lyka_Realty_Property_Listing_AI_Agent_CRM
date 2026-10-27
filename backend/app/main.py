@@ -1113,47 +1113,50 @@ def browse_dataset_properties(
         )
 
     # 1. Check if database has imported dataset listings
-    has_db_dataset = (
-        db.query(func.count(Property.id))
-        .filter(Property.source.in_(["uae_dataset", "dataset"]))
-        .scalar()
-        or 0
-    )
-
-    if has_db_dataset > 0:
-        query = db.query(Property).filter(
-            Property.source.in_(["uae_dataset", "dataset"])
+    has_db_dataset = 0
+    try:
+        has_db_dataset = (
+            db.query(func.count(Property.id))
+            .filter(Property.source.in_(["uae_dataset", "dataset"]))
+            .scalar()
+            or 0
         )
-        if location:
-            query = query.filter(
-                func.lower(Property.location).like(f"%{location.strip().lower()}%")
+        if has_db_dataset > 0:
+            query = db.query(Property).filter(
+                Property.source.in_(["uae_dataset", "dataset"])
             )
-        if property_type:
-            query = query.filter(
-                func.lower(Property.property_type).like(f"%{property_type.strip().lower()}%")
-            )
-        if min_price is not None:
-            query = query.filter(Property.price >= min_price)
-        if max_price is not None:
-            query = query.filter(Property.price <= max_price)
-        if min_bedrooms is not None:
-            query = query.filter(Property.bedrooms >= min_bedrooms)
-        if max_bedrooms is not None:
-            query = query.filter(Property.bedrooms <= max_bedrooms)
+            if location:
+                query = query.filter(
+                    func.lower(Property.location).like(f"%{location.strip().lower()}%")
+                )
+            if property_type:
+                query = query.filter(
+                    func.lower(Property.property_type).like(f"%{property_type.strip().lower()}%")
+                )
+            if min_price is not None:
+                query = query.filter(Property.price >= min_price)
+            if max_price is not None:
+                query = query.filter(Property.price <= max_price)
+            if min_bedrooms is not None:
+                query = query.filter(Property.bedrooms >= min_bedrooms)
+            if max_bedrooms is not None:
+                query = query.filter(Property.bedrooms <= max_bedrooms)
 
-        total = query.count()
-        rows = (
-            query.order_by(Property.price.asc(), Property.id.asc())
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
-        return {
-            "results": [dataset_db_record_dict(p) for p in rows],
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-        }
+            total = query.count()
+            rows = (
+                query.order_by(Property.price.asc(), Property.id.asc())
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+            return {
+                "results": [dataset_db_record_dict(p) for p in rows],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+    except Exception as e:
+        logger.warning("browse_dataset_properties: database query failed (%s); falling back to JSON dataset", e)
 
     # 2. Fallback to bundled JSON when database has not yet been seeded with dataset rows
     result = search_properties(
@@ -1179,17 +1182,22 @@ def browse_dataset_properties(
 async def get_property(property_id: int, db: Session = Depends(get_db)):
     """Get a specific property by ID (checks database first, then dataset cache)."""
     # Check DB for dataset row by external_ref (UAE-<id>) or ID
-    db_prop = (
-        db.query(Property)
-        .filter(
-            (Property.external_ref == f"UAE-{property_id}")
-            | (
-                (Property.id == property_id)
-                & Property.source.in_(["uae_dataset", "dataset"])
+    db_prop = None
+    try:
+        db_prop = (
+            db.query(Property)
+            .filter(
+                (Property.external_ref == f"UAE-{property_id}")
+                | (
+                    (Property.id == property_id)
+                    & Property.source.in_(["uae_dataset", "dataset"])
+                )
             )
+            .first()
         )
-        .first()
-    )
+    except Exception as e:
+        logger.warning("get_property: database query failed (%s); falling back to JSON cache", e)
+
     if db_prop:
         return {
             "property_id": property_id,

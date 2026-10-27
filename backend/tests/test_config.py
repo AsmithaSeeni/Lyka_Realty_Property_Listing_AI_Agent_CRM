@@ -90,9 +90,13 @@ def test_database_url_defaults_to_active_db_from_any_cwd():
         )
         # Absolute path => no './' CWD-relative behaviour at all.
         assert "/./" not in url
-    # The resolved file is the real, live database (must exist).
+    # The resolved target is the expected backend real_estate.db path.
+    # It must resolve to BACKEND_DIR / "real_estate.db" regardless of CWD,
+    # without requiring that an uncommitted local SQLite file pre-exist on disk in CI.
     resolved = Path(data["db_url"].replace("sqlite:///", "", 1))
-    assert resolved.exists() and resolved.name == "real_estate.db"
+    assert resolved.name == "real_estate.db"
+    assert resolved.resolve() == (BACKEND_DIR / "real_estate.db").resolve()
+    assert resolved.parent.is_dir()
 
 
 def test_explicit_database_url_is_honoured():
