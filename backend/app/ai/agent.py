@@ -112,6 +112,7 @@ class AIRealEstateAgent:
     """
     
     # System prompt defining the agent's personality
+    # System prompt defining the agent's personality
     SYSTEM_PROMPT = """You are LykAI - Lyka Realty's female AI property consultant and concierge, 
     an experienced, knowledgeable UAE real estate expert. You speak warmly, casually, and 
     conversationally, like a friendly human female property consultant who knows the market well.
@@ -139,20 +140,31 @@ class AIRealEstateAgent:
 
     ACTIVE LISTENING (highest priority - do this before anything else):
     - Read the customer's WHOLE message and answer what THEY asked or doubted
-      FIRST, after one short natural acknowledgement ("Seri, puriyudhu." /
-      "Okay, noted." / "Aama, kandippa paakalam."). Vary these - never
+      FIRST, after one short natural acknowledgement ("Got it." / "Sure!" / "Understood." /
+      "Seri, puriyudhu." / "Okay, noted." / "Aama, kandippa paakalam."). Vary these - never
       open every reply the same way.
     - Only after responding do you ask at most ONE useful follow-up question.
     - Never ask for anything the CONTEXT block already shows you (budget,
       location, bedrooms, buy/rent, type...). Ask again ONLY if the customer's
-      new message genuinely contradicts what you know.
+      new message genuinely contradicts what you know or changes their preferences.
     - Skip qualification steps that are already answered - as soon as you have
       enough to search, search.
     - If the customer is unsure, guide them briefly (budget + travel + purpose)
       instead of firing questions. If they only want to browse or chat, that's
       fine: keep helping, no pressure, no pushing for phone numbers or viewings.
+    - Respond directly when the customer asks a specific question instead of forcing every interaction into lead collection.
 
     REAL ESTATE AGENT DATA COLLECTION & CONVERSATION FLOW:
+    - In English conversations, speak like a friendly, professional human Dubai real-estate consultant:
+      * Use natural, concise, human-like English.
+      * Avoid robotic openings (never say "Welcome to Lyka Realty AI Assistant" or generic scripted openers).
+      * Do not restart the conversation or greet the customer again on every message.
+      * Acknowledge the customer's requirements naturally and briefly.
+      * Move smoothly between property discovery, clarification, recommendations, and lead collection.
+      * Example style:
+        Customer: "Hi" -> Agent: "Hey! Looking for a property in Dubai?"
+        Customer: "I want a villa in Dubai Marina." -> Agent: "Sure! What budget are you considering?"
+        Customer: "Around AED 2 million." -> Agent: "Got it — a villa in Dubai Marina, around AED 2 million. Let me check the matching property data."
     - Actively guide the conversation as an experienced female real estate consultant to gather
       essential requirements and preferences step-by-step:
       1. Primary need: Buying or Renting (Buying-ah illa rent-ka?)
@@ -163,15 +175,19 @@ class AIRealEstateAgent:
       6. Specific preferences & amenities (near metro, sea view, balcony, pool, gym, furnished/unfurnished, parking, etc.)
       7. Purpose & Timeline (Living / Family use vs. Investment / Rental ROI; immediate or upcoming)
       8. Customer contact details (Name, Phone number / WhatsApp, Email) so it is stored directly into the database as a lead!
+    - If the customer changes their budget, location, or property type (e.g., "actually 3 million" or "show apartments instead"), acknowledge and update the requirements.
+    - Clearly distinguish external UAE market dataset records from verified Lyka Realty inventory. Never invent property availability, prices, amenities, or verification status.
+    - If no verified matching property exists, explain that honestly and offer practical alternatives.
     - Start by greeting the customer warmly, introducing yourself naturally, e.g.:
-      "Vanakkam! I'm LykAI, your AI property consultant from Lyka Realty. Dubai-la enna maadhiri property thedureenga? Buying-ah illa rent-ka?"
+      "Vanakkam! I'm LykAI, your AI property consultant from Lyka Realty. Dubai-la enna maadhiri property thedureenga? Buying-ah illa rent-ka?" (in Tamil/Tanglish)
+      or "Hey! Looking for a property in Dubai?" (in English).
       Your first reply must ALWAYS end with a question mark — an opener without a question leaves the customer with nothing to answer.
       Do NOT repeat your name in every message - once at the start (and if asked) is enough.
     - If the context block shows requirements already gathered, greet briefly and
       ask for the single most useful missing detail (usually budget or location) instead of
       the generic opener — never re-ask what you already know.
     - When you have enough requirements AND the context shows NEW MATCHES
-      (cards actually attached this turn), say something natural like "Unga requirements-ku match aagura nalla properties kidaichirukku, check pannunga!" The property cards
+      (cards actually attached this turn), say something natural like "Unga requirements-ku match aagura nalla properties kidaichirukku, check pannunga!" (or in English: "I found a few properties that match what you're looking for, take a look!"). The property cards
       are rendered automatically by the interface - never paste long listing
       tables. If NO cards are attached, never claim you found properties -
       say plainly that nothing matches those criteria right now and suggest
@@ -179,18 +195,19 @@ class AIRealEstateAgent:
 
     DATABASE & LEAD CAPTURE:
     - When customer provides requirements, preferences, or contact details, warmly acknowledge that you are noting and saving them down:
-      "Unga preferences note pannikitten!" / "Kandippa, unga requirements note pannittaen."
+      "Unga preferences note pannikitten!" / "Kandippa, unga requirements note pannittaen." / "Got it, I've noted down your preferences!"
     - Be transparent: you are an AI assistant and never pretend to be a human agent, but connect customers seamlessly with Lyka Realty's human specialists.
     - When the customer shows interest in properties or requests follow-up/viewings, invite their contact details naturally:
       "I can have our Lyka Realty specialist coordinate a viewing and full details - contact number share panna viruppama?"
+      Ask for contact details only when relevant, and do not repeatedly request the same details.
     - Never say a viewing is booked (the team coordinates that with the owner/agent) - say our specialist will reach out.
     - When they provide their name, phone number, or email, confirm that you have saved their details into the system:
-      "Thank you! Unga details save panniten, our team will get in touch shortly." / "Romba nandri! Unga details note pannikittaen, seekiramae contact pannuvom."
+      "Thank you! Unga details save panniten, our team will get in touch shortly." / "Romba nandri! Unga details note pannikittaen, seekiramae contact pannuvom." / "Thank you! I've saved your details, our specialist will be in touch shortly."
     - Take contact details ONLY when the customer actually offers them - never invent or assume them.
 
     CASUAL TANGLISH ONLY (HUMANIC REAL ESTATE TALK):
     - When interacting with Tamil speakers or in Tanglish mode, you MUST communicate strictly in friendly contemporary CASUAL TANGLISH (Tamil conversational words written in ENGLISH/LATIN ALPHABET with natural English property terms).
-    - CRITICAL: NEVER use pure Tamil script characters (no Unicode \u0B80-\u0BFF).
+    - CRITICAL: NEVER use pure Tamil script characters (no Unicode \\u0B80-\\u0BFF).
     - Talk like a friendly, experienced human female real estate consultant chatting casually on WhatsApp or over a call.
     - Sound warm, polite, cheerful, enthusiastic, and humanic (casual human talk, never stiff, bookish, or robotic).
     - Style references (NOT scripts to copy):
@@ -598,7 +615,13 @@ class AIRealEstateAgent:
         elif len(self.state.messages) == 1 and "?" not in response:
             req = self.state.requirements
             body = response.lower()
-            if not req.get("budget") and "budget" not in body:
+            if not req.get("location") and not req.get("property_type") and not req.get("budget"):
+                question = self._rt(
+                    "Looking for a property in Dubai?",
+                    "Dubai-la enna maadhiri property thedureenga? Buying-ah illa rent-ka?",
+                    "Dubai-la property thedureengala?",
+                )
+            elif not req.get("budget") and "budget" not in body:
                 question = self._rt(
                     "What's your budget range?",
                     "Budget range evlo irukkum?",
@@ -1002,8 +1025,15 @@ class AIRealEstateAgent:
             ord("\u0BEF"): "9",
         })
         
+        # Check for explicit preference change/revision intent:
+        is_change = bool(re.search(
+            r"\b(change|changing|update|updating|instead|switch|actually|prefer|rather|make it|revised?|increase|decrease|new budget|new location)\b|"
+            r"மாத்து|வேற|பதிலா",
+            msg,
+        ))
+
         # Buy / Rent intent (English + common Tamil words)
-        if self.state.requirements.get("buy_rent") is None:
+        if self.state.requirements.get("buy_rent") is None or is_change:
             if re.search(
                 r"\b(buy|purchas|invest(ment)?|own|for myself|buying)\b|வாங்க",
                 msg,
@@ -1014,9 +1044,9 @@ class AIRealEstateAgent:
                 msg,
             ):
                 self.state.requirements["buy_rent"] = "rent"
-        
+
         # Budget (number + optional unit)
-        if self.state.requirements.get("budget") is None:
+        if self.state.requirements.get("budget") is None or is_change:
             budget = self._parse_budget(msg)
             # _parse_budget returns the largest unit-bearing number (million
             # beats "3 bed"), and filters lone phone-like numbers itself.
@@ -1027,11 +1057,12 @@ class AIRealEstateAgent:
                     r"crore|lakh|million|mn|\bcost|afford|"
                     r"விலை|பட்ஜெட்|குள|வரை|லட்சம்|கோடி|மில்லியன்)", msg,
                 )
-                if price_ctx:
+                if price_ctx or is_change:
                     self.state.requirements["budget"] = budget
-        
+
         # Location - common UAE areas (English names first)
-        if self.state.requirements.get("location") is None:
+        if self.state.requirements.get("location") is None or is_change:
+            new_loc = None
             known_locations = [
                 "dubai marina", "downtown dubai", "business bay", "jbr",
                 "palm jumeirah", "arabian ranches", "jvc", "jumeirah village circle",
@@ -1050,10 +1081,10 @@ class AIRealEstateAgent:
             for loc in known_locations:
                 if loc in msg:
                     # Title-case the location nicely
-                    self.state.requirements["location"] = loc.title()
+                    new_loc = loc.title()
                     break
             # Tamil-script city names -> dataset location ("துபாயில்..." -> Dubai)
-            if self.state.requirements.get("location") is None:
+            if new_loc is None:
                 ta_locations = [
                     ("துபாய", "Dubai"),       # துபாய் / துபாயில் / துபாயின்
                     ("அபுதாபி", "Abu Dhabi"),
@@ -1062,18 +1093,20 @@ class AIRealEstateAgent:
                 ]
                 for ta_name, loc in ta_locations:
                     if ta_name in msg:
-                        self.state.requirements["location"] = loc
+                        new_loc = loc
                         break
             # Fallback: "in <city>"
-            if self.state.requirements.get("location") is None:
+            if new_loc is None:
                 loc_match = re.search(r"\bin\s+([a-z\s]+?)(?:\.|,|$|\s+(?:for|with|under|around))", msg)
                 if loc_match:
                     candidate = loc_match.group(1).strip()
                     if len(candidate) > 2 and len(candidate) < 40:
-                        self.state.requirements["location"] = candidate.title()
-        
+                        new_loc = candidate.title()
+            if new_loc:
+                self.state.requirements["location"] = new_loc
+
         # Property type (English + Tamil words)
-        if self.state.requirements.get("property_type") is None:
+        if self.state.requirements.get("property_type") is None or is_change:
             type_map = {
                 "villa": "villa", "apartment": "apartment", "flat": "apartment",
                 "townhouse": "townhouse", "penthouse": "penthouse",
@@ -1090,11 +1123,11 @@ class AIRealEstateAgent:
                 if re.search(r"\b" + re.escape(key) + r"\b" if key.isascii() else re.escape(key), msg):
                     self.state.requirements["property_type"] = value
                     break
-        
+
         # Bedrooms (English + Tamil: "2 பெட்ரூம்", "2 பெட்"). The separator may
         # be a space, nothing, or a hyphen — "2-bedroom" is the most common
         # English spelling and must not fall through to an unfiltered search.
-        if self.state.requirements.get("bedrooms") is None:
+        if self.state.requirements.get("bedrooms") is None or is_change:
             bed_match = re.search(
                 r"(\d+)[\s-]*(?:bed|bhk|bedroom|பெட்ரூம்|பெட்)",
                 msg,
@@ -1103,9 +1136,9 @@ class AIRealEstateAgent:
                 self.state.requirements["bedrooms"] = int(bed_match.group(1))
             elif re.search(r"\bstudio\b|ஸ்டுடியோ", msg):
                 self.state.requirements["bedrooms"] = 0
-        
+
         # Bathrooms
-        if self.state.requirements.get("bathrooms") is None:
+        if self.state.requirements.get("bathrooms") is None or is_change:
             bath_match = re.search(r"(\d+)[\s-]*bath", msg)
             if bath_match:
                 self.state.requirements["bathrooms"] = int(bath_match.group(1))
@@ -1183,20 +1216,27 @@ class AIRealEstateAgent:
                     if 9 <= len(digits.lstrip("+")) <= 14:
                         self.state.contact["phone"] = digits
                         break
-        if not self.state.contact.get("name"):
-            name_patterns = [
-                r"(?:my name is|i am|i'm|this is|call me|name[:\-]?)\s+([A-Za-z\u0B80-\u0BFF]+(?:\s+[A-Za-z\u0B80-\u0BFF]+)?)",
-                r"(?:en\s+peyar(?:\s+is)?|en\s+peru?(?:\s+is)?|ennoda\s+peru?(?:\s+is)?|ennoda\s+name(?:\s+is)?|en\s+name(?:\s+is)?)\s+([A-Za-z\u0B80-\u0BFF]+(?:\s+[A-Za-z\u0B80-\u0BFF]+)?)",
-                r"(?:naan\s+thaan|naan)\s+([A-Za-z\u0B80-\u0BFF]+(?:\s+[A-Za-z\u0B80-\u0BFF]+)?)",
-                r"(?:என்\s+பெயர்|என்\s+பேரு|பெயர்|பேரு)\s*[:\-]?\s*([A-Za-z\u0B80-\u0BFF]+(?:\s+[A-Za-z\u0B80-\u0BFF]+)?)",
-            ]
-            for pat in name_patterns:
-                name_match = re.search(pat, message, re.IGNORECASE)
-                if name_match:
-                    cand = name_match.group(1).strip()
-                    if cand.lower() not in ("looking", "interested", "searching", "buying", "renting", "here", "tamil"):
-                        self.state.contact["name"] = cand.title() if cand.isascii() else cand
-                        break
+        # Name extraction
+        name_patterns = [
+            r"(?:my name is|name[:\-]?)\s+([A-Za-z\u0B80-\u0BFF]+(?:\s+[A-Za-z\u0B80-\u0BFF]+)?)",
+            r"(?:i am|i'm|this is|call me)\s+([A-Za-z\u0B80-\u0BFF]+(?:\s+[A-Za-z\u0B80-\u0BFF]+)?)",
+            r"(?:en\s+peyar(?:\s+is)?|en\s+peru?(?:\s+is)?|ennoda\s+peru?(?:\s+is)?|ennoda\s+name(?:\s+is)?|en\s+name(?:\s+is)?)\s+([A-Za-z\u0B80-\u0BFF]+(?:\s+[A-Za-z\u0B80-\u0BFF]+)?)",
+            r"(?:naan\s+thaan|naan)\s+([A-Za-z\u0B80-\u0BFF]+(?:\s+[A-Za-z\u0B80-\u0BFF]+)?)",
+            r"(?:என்\s+பெயர்|என்\s+பேரு|பெயர்|பேரு)\s*[:\-]?\s*([A-Za-z\u0B80-\u0BFF]+(?:\s+[A-Za-z\u0B80-\u0BFF]+)?)",
+        ]
+        for pat in name_patterns:
+            name_match = re.search(pat, message, re.IGNORECASE)
+            if name_match:
+                cand = name_match.group(1).strip().rstrip(" ,.;:")
+                cand_first = cand.lower().split()[0] if cand else ""
+                if cand_first not in (
+                    "looking", "interested", "searching", "buying", "renting",
+                    "here", "tamil", "planning", "trying", "hoping", "ready",
+                    "new", "just", "a", "an", "the", "not", "also", "wanting",
+                    "aed", "in", "from"
+                ) and len(cand) >= 2:
+                    self.state.contact["name"] = cand.title() if cand.isascii() else cand
+                    break
     
     def _handle_followup(self, user_message: str) -> Optional[Dict[str, Any]]:
         """
@@ -1552,14 +1592,8 @@ class AIRealEstateAgent:
             self.state.contact[info_type] = value
     
     def update_requirement(self, key: str, value: Any):
-        """Update a requirement if not already set (ask once principle)."""
-        if key in self.state.requirements and self.state.requirements[key] is None:
-            self.state.requirements[key] = value
-        elif key in self.state.requirements:
-            # Already set - just note the new info but don't override
-            pass
-        else:
-            self.state.requirements[key] = value
+        """Update a requirement (honours customer and programmatic updates)."""
+        self.state.requirements[key] = value
     
     def get_lead_data(self) -> Dict[str, Any]:
         """Get all collected data for lead creation (types match the DB columns)."""

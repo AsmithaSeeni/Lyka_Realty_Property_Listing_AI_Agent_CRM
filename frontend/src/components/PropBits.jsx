@@ -8,10 +8,11 @@ export const PURPOSE_LABEL = { sale: 'For sale', rent: 'For rent', lease: 'For l
 
 export function priceLabel(p) {
   const cur = p.currency || 'AED'
-  const amount = typeof p.price === 'number' ? p.price.toLocaleString() : p.price
+  const amount = typeof p.price === 'number' ? p.price.toLocaleString() : (p.price || '')
   if (p.price_period === 'per year') return `${cur} ${amount} / year`
+  if (p.price_period === 'per month') return `${cur} ${amount} / month`
   if (p.price_period === 'one-time') return `${cur} ${amount}`
-  return `${cur} ${amount} · Price period not specified`
+  return `${cur} ${amount}`.trim()
 }
 
 /* Fictional demo listings must always say so (Phase 2 safeguard) — this

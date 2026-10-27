@@ -896,7 +896,7 @@ export default function ChatPage() {
                 ref={inputRef}
                 rows={1}
                 value={input}
-                placeholder="Describe your ideal property… (e.g. 3 bed in JVC under 2 million)"
+                placeholder="Ask about properties…"
                 aria-label="Message LykAI"
                 onChange={(e) => {
                   setInput(e.target.value)
