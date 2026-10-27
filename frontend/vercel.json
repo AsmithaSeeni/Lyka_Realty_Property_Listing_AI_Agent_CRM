@@ -5,6 +5,10 @@
     {
       "source": "/api/:path*",
       "destination": "https://lyka-realty-property-listing-ai-agent-crm.onrender.com/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }

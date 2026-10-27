@@ -15,25 +15,33 @@ performed by the audit work** — the steps below are for the operator.
    (`CustomerAuth.jsx`, `LoginPage.jsx`, `server_entry.py`).
 2. Run the verification suite locally:
    - Backend: `C:\Python310\python.exe -m pytest backend/tests/ -q`
-     (expected: 629 passed, 2 skipped)
+     (expected: 658 passed, 2 skipped)
    - Frontend: `cd frontend && npm run build` (expected: clean build)
 3. Commit and push the branch you want deployed (operator action).
 
 ## 2. Vercel project configuration
 
-The project uses two services (`vercel.json`):
+The Vercel project's **Root Directory is `frontend`** (Vite → `dist`); the
+backend is **not** hosted on Vercel — it runs on Render.
 
-- `frontend` — static build of `frontend/` (SPA fallback rewrite → `index.html`)
-- `backend` — Python, service root `backend/`, entry `app.main:app`, `maxDuration: 30`
-- Top-level rewrite `"/api/(.*)"` sends API traffic to the backend service.
+The only Vercel config is `frontend/vercel.json`:
 
-No changes are required to `vercel.json` for this release (the SPA-routing fix
-is already in it and simply needs a deploy to take effect).
+- `"/api/:path*"` → `https://lyka-realty-property-listing-ai-agent-crm.onrender.com/api/:path*`
+  (same-origin proxy to the FastAPI backend; matched first, so API traffic
+  is never swallowed by the SPA fallback)
+- `"/(.*)"` → `/index.html` (SPA fallback for deep links and refreshes;
+  evaluated after the filesystem, so `/assets/*` is untouched)
+
+The former root `vercel.json` (Vercel Services topology with a
+Vercel-hosted Python backend) was **removed** — it conflicted with the
+FastAPI-on-Render architecture and was never read (Root Directory =
+`frontend`).
 
 ## 3. Environment variables (backend service)
 
-Set these in Vercel → Project → Settings → Environment Variables. Values are
-never committed to the repo; `.env.example` documents the names only.
+Set these in Render → Service → Environment (the backend runs on Render,
+not on Vercel). Values are never committed to the repo; `.env.example`
+documents the names only.
 
 | Variable | Required | Notes |
 |---|---|---|
@@ -54,16 +62,21 @@ never committed to the repo; `.env.example` documents the names only.
 | `OPENAI_API_KEY` | No | Staff lead-extraction endpoint |
 | `RATE_LIMIT_*` / `CHAT_RATE_LIMIT_*` | No | Tuning only (see health audit §7 for known limitations) |
 
-Frontend service: no secrets, no `VITE_*` keys — the app calls relative
+Frontend (Vercel): no secrets, no `VITE_*` keys — the app calls relative
 `/api/...` paths only.
 
 ## 4. Deploy
 
-1. Push to the branch connected to Vercel (or press *Redeploy* on the latest
-   deployment after the push).
-2. Watch the backend function build: it must bundle `backend/UAErealestate.json`
-   (~8 MB). If the file is missing from the commit, the dataset checks in the
-   smoke tests will fail with `dataset_rows: 0`.
+1. Push to `main` — **both** platforms deploy from it: Vercel rebuilds the
+   frontend (Root Directory `frontend`), Render rebuilds the FastAPI service.
+2. Watch the Render build (backend): it must include
+   `backend/UAErealestate.json` (~8 MB). If the file is missing from the
+   commit, the dataset checks in the smoke tests will fail with
+   `dataset_rows: 0`.
+3. Confirm the new backend route is live:
+   `GET /api/properties/dataset?limit=1` must return `200` with
+   `"source":"dataset"` (a `422` means Render is still running the previous
+   build).
 
 ## 5. Post-deploy verification (first 5 minutes)
 
@@ -71,8 +84,8 @@ Frontend service: no secrets, no `VITE_*` keys — the app calls relative
    - `status: "healthy"`, `checks.database: "ok"`
    - `checks.property_data.dataset_rows: 25082` (confirms the dataset shipped)
    - `checks.property_data.db_listings: <n>` (0 until seeded — see §6)
-2. If `/api/*` still 500s: open **Vercel → backend service → Logs**. The new
-   startup logging prints one explicit line naming the missing/broken config
+2. If `/api/*` still 500s: open **Render → Service → Logs**. Startup
+   logging prints one explicit line naming the missing/broken config
    (e.g., `DATABASE initialisation failed … Verify DATABASE_URL … and
    TURSO_AUTH_TOKEN`) instead of per-request 500s.
 3. Run the browser checks in `PRODUCTION_SMOKE_TESTS.md`.
@@ -88,8 +101,12 @@ python -m app.seed_demo_properties     # 23 clearly-fictional demo listings
 # or your real-estate import/seeder of record
 ```
 
-- Until seeded, `/api/properties` returns an empty list; **chat property
-  search still works** — it serves the bundled dataset, not this table.
+- Until seeded, `/api/properties` returns an empty list — and the browse page
+  (`/properties`) serves the UAE market dataset via
+  `GET /api/properties/dataset`, labeled "not Lyka-approved inventory"; the
+  "Verified Lyka Realty listings" section appears only once approved +
+  available rows exist. **Chat property search still works** — it serves the
+  bundled dataset, not this table.
 - Demo listings are permanently badged "FICTIONAL DEMO" and are never mixed
   with real inventory.
 

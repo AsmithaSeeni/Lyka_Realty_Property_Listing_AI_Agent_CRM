@@ -35,9 +35,10 @@ def _get_client() -> httpx.Client:
     """Shared HTTP client (module-level, lazily created, thread-tolerant)."""
     global _CLIENT
     if _CLIENT is None or _CLIENT.is_closed:
-        # Serverless-safe bounds: vercel.json caps the backend function at 30s
-        # (maxDuration), so a 25s read keeps the worst case (one non-retried
-        # read timeout, or a fast 5xx plus its single retry) inside the
+        # Serverless-safe bounds: the API holds a 30s per-request budget
+        # (a serverless-era cap kept as the design ceiling), so a 25s read
+        # keeps the worst case (one non-retried read timeout, or a fast 5xx
+        # plus its single retry) inside the
         # function budget — customers get the honest fallback instead of a
         # killed invocation. Connect stays short because connect errors ARE
         # retried once, and two connect timeouts (2x8s) also fit the budget.

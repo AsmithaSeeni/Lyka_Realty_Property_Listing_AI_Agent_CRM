@@ -32,6 +32,7 @@ from app.services.property_search import (
     get_property_by_id,
     search_property_records,
     public_record_dict,
+    dataset_browse_dict,
     get_public_record,
     get_public_records,
     record_focus_dict,
@@ -1067,6 +1068,64 @@ def get_public_property_record(property_id: int, db: Session = Depends(get_db)):
     if prop is None:
         raise HTTPException(status_code=404, detail="Property not found")
     return public_record_dict(prop)
+
+
+# Dataset browse — a SEPARATE endpoint with its OWN id space
+# (dataset property_id 1..25082, never properties.id). Registered BEFORE
+# /api/properties/{property_id} so the literal "dataset" segment is never
+# captured by the legacy dataset-detail route (same ordering rule as the
+# "record" route above). The DB-backed GET /api/properties stays untouched:
+# it continues to serve approved + available Lyka inventory only.
+@app.get("/api/properties/dataset")
+def browse_dataset_properties(
+    location: Optional[str] = Query(None, max_length=120),
+    property_type: Optional[str] = Query(None, max_length=60),
+    min_price: Optional[float] = Query(None, ge=0),
+    max_price: Optional[float] = Query(None, ge=0),
+    min_bedrooms: Optional[int] = Query(None, ge=0, le=20),
+    max_bedrooms: Optional[int] = Query(None, ge=0, le=20),
+    purpose: Optional[Literal["sale", "rent", "lease"]] = None,
+    limit: int = Query(24, ge=1, le=48),
+    offset: int = Query(0, ge=0),
+):
+    """Browse the 25,082-row UAE dataset with normalized, honest fields.
+
+    Separate from GET /api/properties (approved + available DB inventory):
+    dataset rows are external market data, never Lyka-approved listings, so
+    the payload labels every unknown (purpose, price period, availability)
+    as null and carries source="dataset" so the frontend routes detail and
+    enquiry links into the dataset id space — never the DB one.
+
+    `purpose` exists only to REJECT it loudly: the dataset has no sale/rent
+    column, and silently dropping the filter would return the wrong result
+    set. Purpose-filtered browsing stays available on GET /api/properties.
+    """
+    if purpose is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The dataset has no sale/rent purpose field, so a purpose "
+                "filter cannot be applied. Use GET /api/properties for "
+                "purpose-filtered Lyka inventory."
+            ),
+        )
+    result = search_properties(
+        None,  # dataset search never touches the database
+        location=location,
+        property_type=property_type,
+        min_price=min_price,
+        max_price=max_price,
+        min_bedrooms=min_bedrooms,
+        max_bedrooms=max_bedrooms,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "results": [dataset_browse_dict(p) for p in result["results"]],
+        "total": result["total"],
+        "limit": result["limit"],
+        "offset": result["offset"],
+    }
 
 
 @app.get("/api/properties/{property_id}")

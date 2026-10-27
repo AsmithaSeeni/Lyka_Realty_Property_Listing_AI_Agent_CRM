@@ -19,9 +19,10 @@ logger = logging.getLogger(__name__)
 # Accept common browser audio extensions
 ALLOWED_EXTENSIONS = {".webm", ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".mp4"}
 
-# Provider call budget: the backend runs under a 30s serverless function cap
-# (vercel.json maxDuration), so provider HTTP calls get a 25s ceiling — a hung
-# provider surfaces as a clean 502 instead of a killed invocation.
+# Provider call budget: the API holds a 30s per-request budget (a
+# serverless-era cap kept as the design ceiling — also sane on Render), so
+# provider HTTP calls get a 25s ceiling — a hung provider surfaces as a
+# clean 502 instead of a client-side timeout.
 _PROVIDER_TIMEOUT_SECONDS = 25.0
 
 

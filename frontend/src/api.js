@@ -159,6 +159,17 @@ export const api = {
     })
     return req(`/api/properties${qs.toString() ? `?${qs}` : ''}`)
   },
+  // Separate endpoint, separate id space: the UAE dataset browse grid
+  // (dataset property_id 1..25082). Items come back with source="dataset"
+  // and null purpose/price_period/availability — the dataset has none of
+  // those columns, so the server states them instead of guessing.
+  listDataset: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    return req(`/api/properties/dataset${qs.toString() ? `?${qs}` : ''}`)
+  },
   getPropertyRecord: (id) => req(`/api/properties/record/${id}`),
 
   // ---- Agent authentication (internal CRM) ----

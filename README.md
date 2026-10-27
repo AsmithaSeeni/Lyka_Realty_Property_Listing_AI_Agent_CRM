@@ -902,28 +902,38 @@ values. `.env` is gitignored; keep real credentials only there (copy
 
 ## Deploying to Vercel
 
-The repo ships a root `vercel.json` using **Vercel Services**: one project,
-two services, one domain.
+The deployed architecture is **two platforms behind one domain**:
 
-| Service | Root | Public? |
+| Piece | Platform | Configuration |
 |---|---|---|
-| `backend` (FastAPI) | `backend/` | Only via `/api/*` |
-| `frontend` (Vite) | `frontend/` | Yes — catch-all `/*` |
+| Frontend (Vite static SPA) | Vercel — project **Root Directory: `frontend`** | `frontend/vercel.json` |
+| Backend (FastAPI) | Render (`https://lyka-realty-property-listing-ai-agent-crm.onrender.com`) | Render dashboard (env vars, logs) |
 
-Routing is two top-level rewrites: `/api/(.*)` → `backend`, then `/(.*)` →
-`frontend`. The frontend already calls relative `/api/*` paths, so no
-frontend code changes were needed. There are **no service bindings** — the
-frontend is a static SPA served to the browser, and bindings only resolve in
-server-side function code, so nothing in this repo makes a service-to-server
-call.
+`frontend/vercel.json` is the only Vercel config in the repo, with two
+ordered rewrites:
 
-### Database: local SQLite won't work on Vercel
+1. `"/api/:path*"` → the Render backend (same-origin in the browser, so no
+   CORS setup is needed);
+2. `"/(.*)"` → `"/index.html"` — the SPA fallback, so deep links and
+   refreshes (`/properties`, `/chat`, `/login`, …) serve the app instead of
+   Vercel's edge 404. Vercel checks the filesystem first and matches
+   rewrites in order, so `/assets/*` files and `/api/*` are never
+   intercepted by it.
 
-Vercel Functions have a **read-only, ephemeral** filesystem, one private copy
-per instance. The default SQLite file (`backend/real_estate.db`) would reset on
-every cold start and diverge between instances — accounts, sessions, leads and
-conversations would be lost. Point `DATABASE_URL` at a hosted Turso database
-instead; the SQLAlchemy models, queries and migrations are unchanged.
+The frontend calls relative `/api/*` paths only, so no frontend code changes
+were needed for either platform. The former root `vercel.json` (a Vercel
+Services topology that would have hosted FastAPI **on Vercel**) was removed:
+it contradicted the FastAPI-on-Render architecture and was never active —
+the project's Root Directory is `frontend`, so only `frontend/vercel.json`
+is read.
+
+### Database: local SQLite won't work on Render
+
+Render's free-tier disk is **ephemeral** — the default SQLite file
+(`backend/real_estate.db`) is wiped on every redeploy or restart, so
+accounts, sessions, leads and conversations would be lost. Point
+`DATABASE_URL` at a hosted Turso database instead; the SQLAlchemy models,
+queries and migrations are unchanged.
 
 ```bash
 turso db create lyka-realty
@@ -937,13 +947,13 @@ hosted database automatically. For production also set `APP_ENV=production`
 real domain.
 
 > **Driver platform note:** `sqlalchemy-libsql` ships wheels for Linux and
-> macOS only — Vercel's Python runtime is Linux, so it installs there. Local
+> macOS only — Render's runtime is Linux, so it installs there. Local
 > Windows development keeps using SQLite (the default when `DATABASE_URL` is
 > unset) and does not need the package.
 
-### Environment variables (set in the Vercel dashboard)
+### Environment variables (set in the Render dashboard)
 
-`.env` is gitignored and never deployed, so set these per environment:
+`.env` is gitignored and never deployed, so set these on the Render service:
 `NVIDIA_API_KEY`, `STT_PROVIDER`, `STT_API_KEY`, `TTS_PROVIDER`, `TTS_VOICE`,
 `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `APP_ENV=production`, `CORS_ORIGINS`, and
 `SEED_ADMIN_PASSWORD` / `SEED_AGENT_PASSWORD` — production seeding **refuses**

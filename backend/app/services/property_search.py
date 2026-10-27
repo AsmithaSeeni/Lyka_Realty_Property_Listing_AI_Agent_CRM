@@ -268,6 +268,70 @@ def search_properties(
     }
 
 
+# ---------------------------------------------------------------------------
+# Browse serialization for GET /api/properties/dataset.
+#
+# The dataset has exactly 8 columns (property_id, price, property_type,
+# no__of__beds, no_of_baths, area, highlights, location) and carries NO
+# purpose, currency column, title column, images or live availability.
+# Every one of those gaps is stated as null here instead of guessed, so the
+# browse UI can honestly render "not specified" rather than invent facts.
+# ---------------------------------------------------------------------------
+
+
+def dataset_browse_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    """One UAE-dataset row in the normalized browse schema.
+
+    Mapping rules — verbatim values or explicitly parsed numbers, never
+    invented:
+
+    - ``id``: the dataset's own ``property_id`` (unique ints 1..25082). This
+      is a DIFFERENT id space from ``properties.id`` (DB records); callers
+      must route detail/enquiry links by ``source == "dataset"``.
+    - ``title``: the dataset's ``highlights`` headline used verbatim (there
+      is no title column; nothing is composed or rewritten). All 25,082 rows
+      have non-empty highlights.
+    - ``price``: parsed to float via :func:`parse_price` (every row parses;
+      handles Indian-style ``65,00,000`` and western grouping). ``currency``
+      is AED — the project's established dataset convention (the legacy
+      dataset detail view and the agent already render dataset prices as AED).
+    - ``purpose`` / ``price_period`` / ``availability``: always None. The
+      dataset records no sale-vs-rent intent, no billing period and no live
+      availability, and an external row must never be presented as approved
+      or available Lyka inventory.
+    - ``bedrooms``: parsed int (``"Studio"`` -> 0 via :func:`parse_beds`);
+      ``bathrooms`` parsed float; ``area`` parsed float with ``area_unit``
+      read from the raw string (all rows are ``"<n> sqft"`` today, but the
+      unit is never hardcoded from that assumption).
+    - ``images``: always [] — the dataset has no image fields and listing
+      photos are never fabricated.
+    - ``is_demo``: False — these are real external listing rows, not Lyka's
+      synthetic demo records; provenance is carried by ``source`` instead.
+    """
+    raw_area = str(row.get("area") or "").strip()
+    unit_match = re.match(r"^[0-9.,]+\s*(.*)$", raw_area)
+    area_unit = (unit_match.group(1).strip() if unit_match else "") or None
+    return {
+        "id": row.get("property_id"),
+        "source": "dataset",
+        "title": str(row.get("highlights") or "").strip() or None,
+        "price": parse_price(row.get("price")),
+        "currency": "AED",
+        "purpose": None,
+        "price_period": None,
+        "property_type": row.get("property_type") or None,
+        "bedrooms": parse_beds(row.get("no__of__beds")),
+        "bathrooms": parse_baths(row.get("no_of_baths")),
+        "area": parse_area(raw_area),
+        "area_unit": area_unit,
+        "location": str(row.get("location") or ""),
+        "highlights": str(row.get("highlights") or ""),
+        "images": [],
+        "availability": None,
+        "is_demo": False,
+    }
+
+
 # =============================================================================
 # Phase 2: database-backed property queries (foundation for Phase 4 matching)
 # =============================================================================
