@@ -15,6 +15,7 @@ export default function AgentConversations() {
   const [total, setTotal] = React.useState(0)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState(null)
+  const [reload, setReload] = React.useState(0) // bump to retry after an error
 
   const [q, setQ] = React.useState('')
   const [dateFrom, setDateFrom] = React.useState('')
@@ -23,21 +24,38 @@ export default function AgentConversations() {
   const [thread, setThread] = React.useState(null) // full conversation payload
   const [threadLoading, setThreadLoading] = React.useState(false)
 
+  const hasFilters = Boolean(q || dateFrom || dateTo)
+
   React.useEffect(() => {
     const t = setTimeout(() => {
+      let cancelled = false
       setLoading(true)
+      setError(null)
       api
-        .agentConversations({ q, date_from: dateFrom, date_to: dateTo })
+        .agentConversations({ q, date_from: dateFrom, date_to: dateTo, limit: 200 })
         .then((r) => {
-          setRows(r.results)
-          setTotal(r.total)
+          if (cancelled) return
+          setRows(Array.isArray(r.results) ? r.results : [])
+          setTotal(r.total || 0)
           setError(null)
         })
-        .catch((e) => setError(e.message))
-        .finally(() => setLoading(false))
+        .catch((e) => {
+          if (cancelled) return
+          // Surface the REAL cause (401/403/500/network) instead of an
+          // empty table that looks like "no conversations exist".
+          setRows([])
+          setTotal(0)
+          setError(e.message || 'Could not load conversations.')
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+      return () => {
+        cancelled = true
+      }
     }, 250)
     return () => clearTimeout(t)
-  }, [q, dateFrom, dateTo])
+  }, [q, dateFrom, dateTo, reload])
 
   // Escape closes the thread drawer
   React.useEffect(() => {
@@ -77,10 +95,20 @@ export default function AgentConversations() {
           To
           <input className="ax-input" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
         </label>
-        <span className="ax-count">{total} conversation{total === 1 ? '' : 's'}</span>
+        <span className="ax-count">
+          {error ? '—' : `${total} conversation${total === 1 ? '' : 's'}`}
+        </span>
       </div>
 
-      {error && <div className="ax-empty">⚠ {error}</div>}
+      {/* Errors are loud and retryable — never masquerade as an empty list */}
+      {error && (
+        <div className="ax-empty ax-error" role="alert">
+          <div>⚠ Could not load conversations: {error}</div>
+          <button className="btn btn-sm" onClick={() => setReload((n) => n + 1)}>
+            Retry
+          </button>
+        </div>
+      )}
 
       <div className="ax-table ax-table--conv">
         <div className="ax-table__head">
@@ -92,11 +120,26 @@ export default function AgentConversations() {
           <span></span>
         </div>
 
-        {loading && rows.length === 0 && (
+        {loading && rows.length === 0 && !error && (
           <div className="ax-empty sm"><div className="ax-spin" /> Loading conversations…</div>
         )}
-        {!loading && rows.length === 0 && (
-          <div className="ax-empty sm">No conversations match your search.</div>
+        {!loading && rows.length === 0 && !error && !hasFilters && (
+          <div className="ax-empty sm">
+            No conversations yet — they will appear here automatically once
+            customers start chatting with LykAI.
+          </div>
+        )}
+        {!loading && rows.length === 0 && !error && hasFilters && (
+          <div className="ax-empty sm">
+            No conversations match your search.
+            <button
+              className="ax-link"
+              style={{ marginLeft: 10 }}
+              onClick={() => { setQ(''); setDateFrom(''); setDateTo('') }}
+            >
+              Clear filters
+            </button>
+          </div>
         )}
 
         {rows.map((c) => (

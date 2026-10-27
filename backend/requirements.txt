@@ -1,8 +1,29 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
-sqlalchemy>=2.0.0
-pydantic>=2.5.0
-python-dotenv>=1.0.0
-httpx>=0.26.0
-python-multipart>=0.0.6
-bcrypt>=4.0.0
+# Pinned to the versions verified in the current working environment
+# (Phase 1). Installed: Python 3.10.11, fastapi 0.141.1, uvicorn 0.54.0,
+# SQLAlchemy 2.0.54, pydantic 2.13.4, python-dotenv 1.2.2, httpx 0.28.1,
+# python-multipart 0.0.32, bcrypt 5.0.0, pytest 9.1.1.
+# Deliberately NOT upgraded — only pinned after checking compatibility.
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+sqlalchemy==2.0.54
+pydantic==2.13.4
+python-dotenv==1.2.2
+httpx==0.28.1
+python-multipart==0.0.32
+bcrypt==5.0.0
+edge-tts>=7.0.0
+
+# ---------------- Serverless database (Turso / libSQL) ----------------
+# Only needed when DATABASE_URL is a libSQL URL (e.g. Vercel). A local SQLite
+# deployment never opens a connection through it, but it must be present at
+# deploy time or the libsql:// dialect will not resolve.
+#
+# PLATFORM NOTE (verified 2026-10): sqlalchemy-libsql and its libsql-experimental
+# dependency ship wheels for Linux and macOS ONLY — there is no Windows wheel,
+# and building it requires a Rust toolchain. Vercel's Python runtime is Linux,
+# so it installs there. Local Windows development keeps using SQLite (the
+# default when DATABASE_URL is unset) and does not need this package.
+sqlalchemy-libsql==0.2.0
+
+# ---------------- dev / test ----------------
+pytest==9.1.1

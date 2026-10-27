@@ -6,11 +6,14 @@ import ConversationHistory from './pages/ConversationHistory.jsx'
 import PropertyDetails from './pages/PropertyDetails.jsx'
 import PropertiesPage from './pages/PropertiesPage.jsx'
 import CustomerAuth from './pages/CustomerAuth.jsx'
+import SavedProperties from './pages/SavedProperties.jsx'
+import Profile from './pages/Profile.jsx'
 import LoginPage from './pages/LoginPage.jsx'
 import { RequireAgent } from './agent/AgentAuth.jsx'
 import AgentShell from './agent/AgentShell.jsx'
 import AgentDashboard from './agent/AgentDashboard.jsx'
 import AgentLeads from './agent/AgentLeads.jsx'
+import AgentNewLead from './agent/AgentNewLead.jsx'
 import AgentLeadDetail from './agent/AgentLeadDetail.jsx'
 import AgentConversations from './agent/AgentConversations.jsx'
 import { trackPath } from './nav.js'
@@ -30,8 +33,8 @@ function Logo({ light = true }) {
 }
 
 /* Fixed brand header: transparent scrim over the hero, frosted maroon on scroll.
-   Customer nav is deliberately minimal — LykAI is the primary experience:
-   Home (logo) | Properties | LykAI | Sign In (or History once signed in). */
+   Customer nav is deliberately simple and consistent across the site:
+   Properties | LykAI | My Chats, plus Sign In / Profile. */
 function Header() {
   const location = useLocation()
   const [scrolled, setScrolled] = React.useState(false)
@@ -45,7 +48,7 @@ function Header() {
     return () => window.removeEventListener('scroll', onScroll)
   }, [])
 
-  // Signed-in state (drives "Sign In" vs "My Chats"); refreshes when the
+  // Signed-in state (drives "Sign In" vs "Profile"); refreshes when the
   // sign-in/out pages broadcast a change.
   React.useEffect(() => {
     let alive = true
@@ -76,12 +79,21 @@ function Header() {
           <NavLink to="/chat" className={({ isActive }) => `nav-lykai${isActive ? ' active' : ''}`}>
             LykAI
           </NavLink>
+          <NavLink to="/history" className={({ isActive }) => (isActive ? 'active' : '')}>
+            My Chats
+          </NavLink>
           {customer?.authenticated ? (
-            <NavLink to="/history" className={({ isActive }) => (isActive ? 'active' : '')}>
-              My Chats
+            <NavLink
+              to="/profile"
+              className={({ isActive }) => `nav-auth${isActive ? ' active' : ''}`}
+            >
+              Profile
             </NavLink>
           ) : (
-            <NavLink to="/signin" className={({ isActive }) => (isActive ? 'active' : '')}>
+            <NavLink
+              to="/login"
+              className={({ isActive }) => `nav-auth${isActive ? ' active' : ''}`}
+            >
               Sign In
             </NavLink>
           )}
@@ -139,7 +151,10 @@ function Footer() {
       <div className="footer__bottom">
         <span>© {new Date().getFullYear()} Lyka Realty. All rights reserved.</span>
         <span>
-          RERA · Dubai, UAE · <Link to="/login" style={{ textDecoration: 'underline' }}>Agent login</Link>
+          RERA · Dubai, UAE ·{' '}
+          <Link to="/agent/login" style={{ textDecoration: 'underline', opacity: 0.75 }}>
+            Staff login
+          </Link>
         </span>
       </div>
     </footer>
@@ -170,10 +185,10 @@ export default function App() {
   // Chat is a full-screen app view: slim pinned footer so the composer and
   // footer are both always visible. Every other public page gets the full footer.
   const isChat = location.pathname.startsWith('/chat')
-  // The agent CRM and login page have their own dedicated chrome — the
-  // public marketing header/footer must never wrap internal screens.
-  const isAgentArea =
-    location.pathname.startsWith('/agent') || location.pathname === '/login'
+  // The staff CRM (login + protected routes) has its own dedicated chrome —
+  // the public marketing header/footer must never wrap internal screens.
+  // Customer sign-in (/login, /register) keeps the normal customer chrome.
+  const isAgentArea = location.pathname.startsWith('/agent')
 
   // Fresh pages always start at the top (skips smooth-scroll for instant jump)
   React.useEffect(() => {
@@ -190,19 +205,25 @@ export default function App() {
     <>
       {!isAgentArea && <Header />}
       <Routes>
-        {/* ---------- Public customer flow ---------- */}
+        {/* ---------- Customer website (guest-friendly, no login required) ---------- */}
         <Route path="/" element={<LandingPage />} />
         <Route path="/chat" element={<ChatPage />} />
         <Route path="/chat/:conversationId" element={<ChatPage />} />
         <Route path="/history" element={<ConversationHistory />} />
+        <Route path="/saved" element={<SavedProperties />} />
+        <Route path="/profile" element={<Profile />} />
         <Route path="/properties" element={<PropertiesPage />} />
         <Route path="/property/:id" element={<PropertyDetails />} />
         <Route path="/properties/:id" element={<PropertyDetails />} />
+        {/* Optional customer accounts — sign-in and registration */}
+        <Route path="/login" element={<CustomerAuth />} />
+        <Route path="/register" element={<CustomerAuth />} />
+        {/* Legacy alias for old sign-in links */}
         <Route path="/signin" element={<CustomerAuth />} />
 
-        {/* ---------- Agent flow (login + protected CRM) ---------- */}
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/crm" element={<Navigate to="/login" replace />} />
+        {/* ---------- Staff CRM (separate portal, separate session) ---------- */}
+        <Route path="/agent/login" element={<LoginPage />} />
+        <Route path="/crm" element={<Navigate to="/agent/login" replace />} />
         <Route path="/agent" element={<RequireAgent />}>
           <Route index element={<Navigate to="/agent/dashboard" replace />} />
           <Route path="dashboard" element={<AgentShell />}>
@@ -210,6 +231,7 @@ export default function App() {
           </Route>
           <Route path="leads" element={<AgentShell />}>
             <Route index element={<AgentLeads />} />
+            <Route path="new" element={<AgentNewLead />} />
             <Route path=":id" element={<AgentLeadDetail />} />
           </Route>
           <Route path="conversations" element={<AgentShell />}>

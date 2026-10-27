@@ -1,6 +1,7 @@
 import React from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import api from '../api.js'
+import SavedGrid from '../components/SavedGrid.jsx'
 
 export default function ConversationHistory() {
   const navigate = useNavigate()
@@ -85,10 +86,10 @@ export default function ConversationHistory() {
             properties you like.
           </p>
           <div className="keep-prompt__btns">
-            <Link className="btn gold" to="/signin?mode=login&next=/history">
+            <Link className="btn gold" to="/login?next=/history">
               Sign In
             </Link>
-            <Link className="btn dark" to="/signin?mode=register&next=/history">
+            <Link className="btn dark" to="/register?next=/history">
               Create Account
             </Link>
             <button className="btn ghost" onClick={() => setGuestViewed(true)}>
@@ -122,6 +123,11 @@ export default function ConversationHistory() {
               <span className="ico">→</span> Talk to LykAI
             </button>
             {customer.authenticated && (
+              <button className="btn ghost btn-sm" onClick={() => navigate('/profile')}>
+                Profile
+              </button>
+            )}
+            {customer.authenticated && (
               <button className="btn dark btn-sm" onClick={signOut}>Sign out</button>
             )}
           </div>
@@ -134,8 +140,8 @@ export default function ConversationHistory() {
       {!customer.authenticated && (
         <div className="keep-banner">
           💬 Want to keep these chats?{' '}
-          <Link to="/signin?next=/history">Sign in</Link> or{' '}
-          <Link to="/signin?mode=register&next=/history">create a free account</Link>.
+          <Link to="/login?next=/history">Sign in</Link> or{' '}
+          <Link to="/register?next=/history">create a free account</Link>.
         </div>
       )}
 
@@ -143,34 +149,7 @@ export default function ConversationHistory() {
       {customer.authenticated && savedProps.length > 0 && (
         <>
           <div className="subhead">Saved properties</div>
-          <div className="browse-grid" style={{ marginBottom: 26 }}>
-            {savedProps.map((p) => (
-              <article className="prop-card browse-card" key={p.property_id}>
-                <div className="prop-thumb">
-                  <span>{/villa/i.test(p.property_type || '') ? '🏡' : '🏢'}</span>
-                  <span className="loc">📍 {p.location || ''}</span>
-                </div>
-                <div className="prop-body">
-                  <div className="prop-price">AED {p.price}</div>
-                  <div className="prop-title">{p.property_type || 'Property'} · {p.location}</div>
-                  <div className="browse-ctas">
-                    <button
-                      className="btn gold btn-sm"
-                      onClick={() => navigate(`/property/${p.property_id}`)}
-                    >
-                      View Property
-                    </button>
-                    <button
-                      className="btn ghost btn-sm"
-                      onClick={() => navigate(`/chat?ref=${p.property_id}`)}
-                    >
-                      Ask LykAI
-                    </button>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
+          <SavedGrid items={savedProps} />
         </>
       )}
 

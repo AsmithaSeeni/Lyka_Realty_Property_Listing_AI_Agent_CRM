@@ -1,0 +1,60 @@
+# Phase 10 — continuous integration. Offline by design:
+#  - no secrets are configured for this workflow, and the backend suite runs
+#    fully offline (live provider tests are opt-in via RUN_LIVE_TESTS=1,
+#    which is intentionally never set here, so no real NVIDIA/OpenAI calls);
+#  - no deployments, no database/artifact uploads, no secret printing.
+# Fails whenever the backend test suite or the frontend build fails.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    name: Backend tests (offline)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"   # matches the pinned, verified environment
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full backend test suite
+        run: python -m pytest tests -q
+        env:
+          RUN_LIVE_TESTS: "0"      # belt-and-braces: live tests stay skipped
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies (locked)
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build

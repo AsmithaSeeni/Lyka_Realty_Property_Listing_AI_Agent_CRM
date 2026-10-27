@@ -1,26 +1,44 @@
 import React from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useLocation, useSearchParams } from 'react-router-dom'
 import api from '../api.js'
 
-/* Optional customer sign-in / registration.
+/* Optional customer sign-in (/login) and registration (/register).
    Guests never need this to chat — it only unlocks keeping conversations,
-   saved properties and history across visits. */
+   saved properties and history across visits. The visible mode follows the
+   route; legacy ?mode= links on /signin still work. */
 export default function CustomerAuth() {
   const navigate = useNavigate()
+  const location = useLocation()
   const [searchParams] = useSearchParams()
-  const next = searchParams.get('next') || '/chat'
-  const initialMode = searchParams.get('mode') === 'register' ? 'register' : 'login'
+  // Only allow same-app redirects (must start with a single '/'): blocks
+  // protocol-relative ("//evil.example") or absolute URLs from the query.
+  const rawNext = searchParams.get('next') || '/chat'
+  const next =
+    rawNext.startsWith('/') && !rawNext.startsWith('//') ? rawNext : '/chat'
+  const nextQs = next ? `?next=${encodeURIComponent(next)}` : ''
+  const initialMode =
+    location.pathname === '/register' || searchParams.get('mode') === 'register'
+      ? 'register'
+      : 'login'
 
   const [mode, setMode] = React.useState(initialMode)
   const [email, setEmail] = React.useState('')
   const [password, setPassword] = React.useState('')
+  const [confirm, setConfirm] = React.useState('')
   const [name, setName] = React.useState('')
   const [error, setError] = React.useState(null)
   const [busy, setBusy] = React.useState(false)
 
-  const switchMode = (m) => {
+  /* Switch between login/register. `keepError` preserves a message across the
+     switch — without it, the duplicate-account (409) notice set in submit()
+     was immediately wiped by setError(null) and the user saw a silent form. */
+  const switchMode = (m, keepError = null) => {
     setMode(m)
-    setError(null)
+    setError(keepError)
+    setConfirm('') // confirm-password only exists while registering
+    // Keep the URL truthful (/login <-> /register) while preserving ?next=
+    const target = m === 'register' ? `/register${nextQs}` : `/login${nextQs}`
+    if (location.pathname !== target.split('?')[0]) navigate(target)
   }
 
   const submit = async (e) => {
@@ -35,10 +53,20 @@ export default function CustomerAuth() {
       setError('Password must be at least 6 characters.')
       return
     }
+    if (mode === 'register') {
+      if (!confirm) {
+        setError('Please confirm your password.')
+        return
+      }
+      if (confirm !== password) {
+        setError('Passwords do not match.')
+        return
+      }
+    }
     setBusy(true)
     try {
       if (mode === 'register') {
-        await api.customerRegister(mail, password, name.trim())
+        await api.customerRegister(mail, password, name.trim(), confirm)
       } else {
         await api.customerLogin(mail, password)
       }
@@ -46,12 +74,16 @@ export default function CustomerAuth() {
       window.dispatchEvent(new Event('lyka:customer'))
       navigate(next, { replace: true })
     } catch (err) {
-      setError(
-        err.status === 409
-          ? 'An account already exists with this email — sign in instead.'
-          : err.message || 'Could not sign you in. Please try again.',
-      )
-      if (err.status === 409) setMode('login')
+      if (err.status === 409) {
+        // Duplicate registration: switch to the sign-in form AND keep the
+        // explanation visible (email + password are kept for convenience).
+        switchMode(
+          'login',
+          'An account already exists with this email — sign in instead.',
+        )
+      } else {
+        setError(err.message || 'Could not sign you in. Please try again.')
+      }
     } finally {
       setBusy(false)
     }
@@ -103,6 +135,23 @@ export default function CustomerAuth() {
               required
             />
           </label>
+
+          {mode === 'register' && (
+            <label>
+              <span>Confirm Password</span>
+              <input
+                type="password"
+                value={confirm}
+                onChange={(e) => {
+                  setConfirm(e.target.value)
+                  if (error === 'Passwords do not match.') setError(null)
+                }}
+                placeholder="Re-enter your password"
+                autoComplete="new-password"
+                required
+              />
+            </label>
+          )}
 
           {error && <div className="notice">⚠️ {error}</div>}
 

@@ -3,9 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import api from '../api.js'
 
 /**
- * /login — dedicated agent entry point (not linked from the customer flow
- * except the small footer link). Already-authenticated agents bounce straight
- * to /agent/dashboard.
+ * /agent/login — dedicated staff entry point for the internal Lyka Realty CRM
+ * (kept fully separate from the customer /login). A subtle "Staff login" link
+ * in the customer footer is the only site-wide way in. Already-authenticated
+ * agents bounce straight to /agent/dashboard. Never displays credentials.
  */
 export default function LoginPage() {
   const navigate = useNavigate()
@@ -15,12 +16,27 @@ export default function LoginPage() {
   const [busy, setBusy] = React.useState(false)
   const [checked, setChecked] = React.useState(false)
 
-  // Already signed in? Go to the dashboard
+  // Already signed in? Go to the dashboard.
+  // Bounded check: if /api/auth/me hangs (backend down / network stall),
+  // unlock the form after 4s instead of leaving the button disabled forever.
   React.useEffect(() => {
+    let alive = true
+    const unlock = setTimeout(() => {
+      if (alive) setChecked(true)
+    }, 4000)
     api
       .me()
-      .then(() => navigate('/agent/dashboard', { replace: true }))
-      .catch(() => setChecked(true))
+      .then(() => {
+        if (alive) navigate('/agent/dashboard', { replace: true })
+      })
+      .catch(() => {
+        if (alive) setChecked(true)
+      })
+      .finally(() => clearTimeout(unlock))
+    return () => {
+      alive = false
+      clearTimeout(unlock)
+    }
   }, [navigate])
 
   const submit = async (e) => {
@@ -32,7 +48,11 @@ export default function LoginPage() {
       await api.login(username.trim(), password)
       navigate('/agent/dashboard', { replace: true })
     } catch (err) {
-      setError(err.status === 401 ? 'Invalid username or password.' : err.message)
+      setError(
+        err.status === 401
+          ? 'Invalid username or password.'
+          : err.message || 'Sign-in failed. Check your connection and try again.',
+      )
     } finally {
       setBusy(false)
     }
@@ -67,8 +87,8 @@ export default function LoginPage() {
       {/* Form panel */}
       <main className="lg-form">
         <form onSubmit={submit} className="lg-card" autoComplete="on">
-          <span className="eyebrow">Agent sign in</span>
-          <h2>Welcome back</h2>
+          <span className="eyebrow">Internal Lyka Realty CRM</span>
+          <h2>Staff sign in</h2>
           <p className="lg-card__sub">Use your Lyka Realty CRM credentials.</p>
 
           {error && <div className="lg-error">⚠ {error}</div>}
@@ -79,7 +99,7 @@ export default function LoginPage() {
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="admin@lykarealty.ae"
+              placeholder="you@lykarealty.ae"
               autoComplete="username"
               autoFocus
               required
@@ -101,15 +121,6 @@ export default function LoginPage() {
           <button className="btn btn-block lg-submit" type="submit" disabled={busy || !checked}>
             {busy ? 'Signing in…' : 'Sign in to CRM'}
           </button>
-
-          {import.meta.env.DEV && (
-            <div className="lg-demo">
-              <b>Dev accounts</b>
-              admin@lykarealty.ae / Admin@123 (admin)
-              <br />
-              agent@lykarealty.ae / Agent@123 (scoped agent)
-            </div>
-          )}
 
           <a className="lg-back" href="/">← Back to public site</a>
         </form>

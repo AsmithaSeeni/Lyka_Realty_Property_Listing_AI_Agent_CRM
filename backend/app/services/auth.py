@@ -18,6 +18,7 @@ import bcrypt
 from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import (
     Agent, AgentSession, Conversation, Customer, Lead, SavedProperty, get_db,
 )
@@ -114,7 +115,7 @@ def set_agent_cookie(response: Response, token: str) -> None:
         value=token,
         httponly=True,          # JS can never read the session token
         samesite="lax",         # no cross-site sends; works on the Vite proxy
-        secure=False,           # localhost is http; set True behind TLS
+        secure=settings.COOKIE_SECURE,  # False on http localhost; true in production/HTTPS
         max_age=SESSION_TTL_HOURS * 3600,
         path="/",
     )
@@ -163,7 +164,7 @@ def get_or_create_customer(db: Session, request: Request, response: Response) ->
             value=token,
             httponly=True,
             samesite="lax",
-            secure=False,
+            secure=settings.COOKIE_SECURE,
             max_age=365 * 24 * 3600,
             path="/",
         )
@@ -177,7 +178,7 @@ def set_customer_cookie(response: Response, token: str, max_age_days: int = 365)
         value=token,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=settings.COOKIE_SECURE,
         max_age=max_age_days * 24 * 3600,
         path="/",
     )

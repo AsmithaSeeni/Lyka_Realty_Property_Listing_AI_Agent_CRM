@@ -11,7 +11,7 @@ export const useAgent = () => React.useContext(AgentContext)
 /* ------------------------------------------------------------------ */
 /* Route guard: /agent/* requires a valid backend session.             */
 /* Validates with GET /api/auth/me (server-side truth), redirects      */
-/* unauthenticated users to /login.                                     */
+/* unauthenticated users to /agent/login.                              */
 /* ------------------------------------------------------------------ */
 export function RequireAgent() {
   const [status, setStatus] = React.useState('loading') // loading | ok | fail
@@ -47,7 +47,7 @@ export function RequireAgent() {
   if (status === 'fail') {
     // Frontend convenience redirect — the backend still rejects every
     // request independently (defence in depth).
-    return <Navigate to="/login" replace />
+    return <Navigate to="/agent/login" replace />
   }
 
   const logout = async () => {
@@ -57,7 +57,7 @@ export function RequireAgent() {
       /* ignore — session may already be gone */
     }
     setAgent(null)
-    window.location.assign('/login')
+    window.location.assign('/agent/login')
   }
 
   return (

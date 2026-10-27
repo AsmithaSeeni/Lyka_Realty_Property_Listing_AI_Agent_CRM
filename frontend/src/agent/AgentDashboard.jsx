@@ -45,6 +45,8 @@ export default function AgentDashboard() {
   if (!data) return <div className="ax-empty"><div className="ax-spin" /> Loading dashboard…</div>
 
   const counts = data.counts || {}
+  const priority = data.priority || {}      // high / medium / low / unscored
+  const followUps = data.follow_ups || {}   // overdue / due_today / upcoming
 
   return (
     <div>
@@ -56,6 +58,31 @@ export default function AgentDashboard() {
             <span>{s.label}</span>
           </div>
         ))}
+      </div>
+
+      {/* Priority + follow-up workload (Phase 5 — real DB counts) */}
+      <div className="ax-stats">
+        <div className={`ax-stat ${priority.high ? 'l' : ''}`}>
+          <b>{priority.high ?? 0}</b><span>High priority</span>
+        </div>
+        <div className={`ax-stat ${priority.medium ? 'q' : ''}`}>
+          <b>{priority.medium ?? 0}</b><span>Medium priority</span>
+        </div>
+        <div className={`ax-stat ${priority.low ? 'n' : ''}`}>
+          <b>{priority.low ?? 0}</b><span>Low priority</span>
+        </div>
+        <div className="ax-stat">
+          <b>{priority.unscored ?? 0}</b><span>Unscored</span>
+        </div>
+        <div className={`ax-stat ${followUps.overdue ? 'l' : ''}`}>
+          <b>{followUps.overdue ?? 0}</b><span>Follow-ups overdue</span>
+        </div>
+        <div className={`ax-stat ${followUps.due_today ? 'q' : ''}`}>
+          <b>{followUps.due_today ?? 0}</b><span>Due today</span>
+        </div>
+        <div className={`ax-stat ${followUps.upcoming ? 'v' : ''}`}>
+          <b>{followUps.upcoming ?? 0}</b><span>Upcoming</span>
+        </div>
       </div>
 
       <div className="ax-grid2">

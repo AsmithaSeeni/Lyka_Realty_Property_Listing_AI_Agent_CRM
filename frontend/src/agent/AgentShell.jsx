@@ -10,6 +10,7 @@ const NAV = [
 
 const TITLES = [
   { match: '/agent/dashboard', title: 'Dashboard', sub: 'Pipeline overview' },
+  { match: '/agent/leads/new', title: 'New lead', sub: 'Review extracted details, confirm & save' },
   { match: '/agent/leads/', title: 'Lead detail', sub: 'Customer profile & AI conversation' },
   { match: '/agent/leads', title: 'Leads', sub: 'All leads in your scope' },
   { match: '/agent/conversations', title: 'Conversations', sub: 'Customer ↔ LykAI threads' },

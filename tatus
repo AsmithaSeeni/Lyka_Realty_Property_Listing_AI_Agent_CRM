@@ -1,0 +1,15 @@
+warning: in the working copy of '.env.example', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/app/ai/nvidia_client.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/app/config.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/app/services/property_search.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/app/services/voice.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/requirements.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/agent/AgentLeadDetail.jsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/agent/AgentLeads.jsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/pages/ChatPage.jsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/pages/PropertiesPage.jsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/pages/PropertyDetails.jsx', LF will be replaced by CRLF the next time Git touches it
+backend/app/ai/agent.py:115: trailing whitespace.
+[32m+[m[32m    SYSTEM_PROMPT = """You are LykAI - Lyka Realty's female AI property consultant and concierge,[m[41m [m
+backend/app/ai/agent.py:116: trailing whitespace.
+[32m+[m[32m    an experienced, knowledgeable UAE real estate expert. You speak warmly, casually, and[m[41m [m

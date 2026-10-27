@@ -12,9 +12,41 @@ export const STATUSES = [
   ['closed_lost', 'Lost'],
 ]
 
+const PRIORITIES = [
+  ['', 'Any priority'],
+  ['high', 'High'],
+  ['medium', 'Medium'],
+  ['low', 'Low'],
+  ['unscored', 'Unscored'],
+]
+
+const INTENTS = [
+  ['', 'Any intent'],
+  ['buy', 'Buy'],
+  ['rent', 'Rent'],
+  ['lease', 'Lease'],
+  ['unknown', 'Unknown'],
+]
+
+// Follow-up state buckets (UTC day boundaries, computed server-side)
+const FOLLOWUPS = [
+  ['', 'Any follow-up'],
+  ['overdue', 'Overdue'],
+  ['due_today', 'Due today'],
+  ['upcoming', 'Upcoming'],
+  ['pending', 'Pending'],
+  ['completed', 'Completed'],
+]
+
+const PAGE = 50
+
 export function statusLabel(v) {
   const hit = STATUSES.find(([k]) => k === v)
   return hit ? hit[1] : v
+}
+
+export function priorityLabel(v) {
+  return ({ high: 'High', medium: 'Medium', low: 'Low' })[v] || '—'
 }
 
 export function fmtDate(iso) {
@@ -25,7 +57,7 @@ export function fmtDate(iso) {
 }
 
 /**
- * /agent/leads — searchable, filterable, sortable lead list.
+ * /agent/leads — searchable, filterable, paginated lead list.
  * Server-side filtering on purpose: the backend re-applies the agent's data
  * scope to every query (never trusts the frontend).
  */
@@ -38,15 +70,20 @@ export default function AgentLeads() {
 
   const [q, setQ] = React.useState('')
   const [status, setStatus] = React.useState('')
+  const [priority, setPriority] = React.useState('')
+  const [intent, setIntent] = React.useState('')
+  const [followUp, setFollowUp] = React.useState('')
   const [location, setLocation] = React.useState('')
   const [sort, setSort] = React.useState('newest')
 
-  // Debounced fetch whenever a filter changes
+  const filters = { q, status, priority, intent, follow_up: followUp, location, sort }
+
+  // Debounced fetch whenever a filter changes (always resets to page 1)
   React.useEffect(() => {
     const t = setTimeout(() => {
       setLoading(true)
       api
-        .agentLeads({ q, status, location, sort })
+        .agentLeads({ ...filters, limit: PAGE, offset: 0 })
         .then((r) => {
           setRows(r.results)
           setTotal(r.total)
@@ -56,7 +93,20 @@ export default function AgentLeads() {
         .finally(() => setLoading(false))
     }, 250)
     return () => clearTimeout(t)
-  }, [q, status, location, sort])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, status, priority, intent, followUp, location, sort])
+
+  const loadMore = () => {
+    setLoading(true)
+    api
+      .agentLeads({ ...filters, limit: PAGE, offset: rows.length })
+      .then((r) => {
+        setRows((prev) => [...prev, ...r.results])
+        setTotal(r.total)
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false))
+  }
 
   const changeStatus = async (e, lead) => {
     e.stopPropagation()
@@ -87,6 +137,15 @@ export default function AgentLeads() {
           <option value="">All statuses</option>
           {STATUSES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
         </select>
+        <select className="ax-input" value={priority} onChange={(e) => setPriority(e.target.value)}>
+          {PRIORITIES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+        </select>
+        <select className="ax-input" value={intent} onChange={(e) => setIntent(e.target.value)}>
+          {INTENTS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+        </select>
+        <select className="ax-input" value={followUp} onChange={(e) => setFollowUp(e.target.value)}>
+          {FOLLOWUPS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+        </select>
         <input
           className="ax-input"
           placeholder="Filter location…"
@@ -98,6 +157,9 @@ export default function AgentLeads() {
           <option value="interaction">Recent interaction</option>
         </select>
         <span className="ax-count">{total} lead{total === 1 ? '' : 's'}</span>
+        <button className="btn btn-sm" onClick={() => navigate('/agent/leads/new')}>
+          ＋ New lead
+        </button>
       </div>
 
       {error && <div className="ax-empty">⚠ {error}</div>}
@@ -109,6 +171,7 @@ export default function AgentLeads() {
           <span>Contact</span>
           <span>Requirement</span>
           <span>Budget</span>
+          <span>Score</span>
           <span>Status</span>
           <span>Last interaction</span>
           <span>Created</span>
@@ -144,6 +207,15 @@ export default function AgentLeads() {
               {l.bedrooms != null ? `${l.bedrooms} bed` : 'Studio/unknown'} · {l.buy_rent}
             </span>
             <span className="ax-cell-strong">{l.budget}</span>
+            <span>
+              {l.lead_score == null ? (
+                <span className="ax-muted">—</span>
+              ) : (
+                <span className={`ax-prio ${l.priority}`}>
+                  {priorityLabel(l.priority)} · {Math.round(l.lead_score)}
+                </span>
+              )}
+            </span>
             <span onClick={(e) => e.stopPropagation()}>
               <select
                 className={`ax-status-select ${l.status}`}
@@ -158,6 +230,14 @@ export default function AgentLeads() {
           </div>
         ))}
       </div>
+
+      {rows.length > 0 && rows.length < total && (
+        <div style={{ marginTop: 14, textAlign: 'center' }}>
+          <button className="btn btn-sm btn-ghost" disabled={loading} onClick={loadMore}>
+            {loading ? 'Loading…' : `Load more (${rows.length} of ${total})`}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
