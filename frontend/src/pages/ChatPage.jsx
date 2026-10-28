@@ -14,6 +14,10 @@ function pickTtsVoice(text) {
   return TAMIL_SCRIPT.test(String(text || '')) ? 'ta-IN-PallaviNeural' : null
 }
 
+function pickTtsLanguage(text) {
+  return TAMIL_SCRIPT.test(String(text || '')) ? 'ta-IN' : 'en-IN'
+}
+
 const LANG_LABEL = { en: 'English', ta: 'தமிழ்', 'ta-Latn': 'Tanglish', mixed: 'Mixed' }
 
 function fmtTime(iso) {
@@ -165,8 +169,8 @@ async function playBase64Audio(base64Data, format = 'mp3') {
   return playAudioSrc(`data:audio/${format};base64,${base64Data}`)
 }
 
-/* Server-synthesized audio (free neural voices via the backend). */
-async function playBackendAudio(text, lang = 'ta-Latn', voice = null) {
+/* Server-synthesized audio (neural voices via the backend). */
+async function playBackendAudio(text, lang = 'en-IN', voice = null) {
   try {
     stopActivePlayback()
     const res = await api.synthesize(text, lang, voice)
@@ -415,11 +419,26 @@ export default function ChatPage() {
       setSpeakingKey(null)
       return false
     }
+    stopActivePlayback()
+    if (window.speechSynthesis) window.speechSynthesis.cancel()
     unlockAudio()
     const cleanText = cleanSpeechText(text)
     if (!cleanText) return false
     setSpeakingKey(key)
-    const ok = await playBackendAudio(cleanText, 'ta-Latn', pickTtsVoice(cleanText))
+    const lang = pickTtsLanguage(cleanText)
+    let ok = await playBackendAudio(cleanText, lang, pickTtsVoice(cleanText))
+    if (!ok && window.speechSynthesis) {
+      try {
+        window.speechSynthesis.cancel()
+        const utterance = new SpeechSynthesisUtterance(cleanText)
+        utterance.lang = lang
+        ok = await new Promise((resolve) => {
+          utterance.onend = () => resolve(true)
+          utterance.onerror = () => resolve(false)
+          window.speechSynthesis.speak(utterance)
+        })
+      } catch { /* noop */ }
+    }
     setSpeakingKey(null)
     return ok
   }, [speakingKey])
@@ -429,6 +448,10 @@ export default function ChatPage() {
     async (text, { fromVoice = false, propertyId = null } = {}) => {
       const msg = (text || '').trim()
       if (!msg) return
+      // Stop any active speech/audio playback to prevent overlap
+      stopActivePlayback()
+      if (window.speechSynthesis) window.speechSynthesis.cancel()
+      setSpeakingKey(null)
       unlockAudio()
       setError(null)
       setInput('')
@@ -483,11 +506,28 @@ export default function ChatPage() {
           if (!muted) {
             setVoiceState('speaking')
             setVoiceLog((l) => [...l, { who: 'ai', text: res.response }])
+            let played = false
             if (res.audio_base64) {
-              await playBase64Audio(res.audio_base64, res.audio_format || 'mp3')
-            } else {
+              played = await playBase64Audio(res.audio_base64, res.audio_format || 'mp3')
+            }
+            if (!played) {
               const cleanText = cleanSpeechText(res.response)
-              if (cleanText) await playBackendAudio(cleanText, 'ta-Latn', pickTtsVoice(cleanText))
+              if (cleanText) {
+                const lang = pickTtsLanguage(cleanText)
+                played = await playBackendAudio(cleanText, lang, pickTtsVoice(cleanText))
+                if (!played && window.speechSynthesis) {
+                  try {
+                    window.speechSynthesis.cancel()
+                    const utterance = new SpeechSynthesisUtterance(cleanText)
+                    utterance.lang = lang
+                    await new Promise((resolve) => {
+                      utterance.onend = () => resolve(true)
+                      utterance.onerror = () => resolve(false)
+                      window.speechSynthesis.speak(utterance)
+                    })
+                  } catch { /* noop */ }
+                }
+              }
             }
             setVoiceState('idle')
           }
@@ -627,13 +667,32 @@ export default function ChatPage() {
   const replayLastReply = async () => {
     const last = lastReplyRef.current
     if (!last) return
+    stopActivePlayback()
+    if (window.speechSynthesis) window.speechSynthesis.cancel()
     unlockAudio()
     setVoiceState('speaking')
+    let played = false
     if (last.base64) {
-      await playBase64Audio(last.base64, last.format)
-    } else {
+      played = await playBase64Audio(last.base64, last.format)
+    }
+    if (!played) {
       const cleanText = cleanSpeechText(last.text)
-      if (cleanText) await playBackendAudio(cleanText, 'ta-Latn', pickTtsVoice(cleanText))
+      if (cleanText) {
+        const lang = pickTtsLanguage(cleanText)
+        played = await playBackendAudio(cleanText, lang, pickTtsVoice(cleanText))
+        if (!played && window.speechSynthesis) {
+          try {
+            window.speechSynthesis.cancel()
+            const utterance = new SpeechSynthesisUtterance(cleanText)
+            utterance.lang = lang
+            await new Promise((resolve) => {
+              utterance.onend = () => resolve(true)
+              utterance.onerror = () => resolve(false)
+              window.speechSynthesis.speak(utterance)
+            })
+          } catch { /* noop */ }
+        }
+      }
     }
     setVoiceState('idle')
   }

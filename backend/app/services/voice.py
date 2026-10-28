@@ -43,10 +43,45 @@ def _stt_config():
     )
 
 
+def _clean_speech_text(text: str) -> str:
+    """Prepare conversational text for natural, humanic TTS pronunciation."""
+    import re
+    # Remove internal system annotations like [internal ...]
+    cleaned = re.sub(r"\[internal[^\]]*\]", "", text, flags=re.IGNORECASE)
+    # Common real-estate and assistant pronunciations
+    cleaned = re.sub(r"\bLykAI\b", "Like AI", cleaned)
+    cleaned = re.sub(r"(\d+)BHK\b", r"\1 BHK", cleaned)
+    cleaned = re.sub(r"\bAED\b", "AED", cleaned)
+    # Strip markdown symbols
+    cleaned = re.sub(r"[*_#`~>\[\]\(\)]", " ", cleaned)
+    # Strip emoji Unicode ranges
+    cleaned = re.sub(r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\u2600-\u26FF\u2700-\u27BF]", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or text.strip()
+
+
 def _tts_config():
-    provider = os.getenv("TTS_PROVIDER", "edge-tts").lower()
-    sarvam_key = os.getenv("SARVAM_API_KEY", "")
-    tts_key = os.getenv("TTS_API_KEY", "")
+    sarvam_key = os.getenv("SARVAM_API_KEY", "").strip()
+    tts_key = os.getenv("TTS_API_KEY", "").strip()
+    provider_env = os.getenv("TTS_PROVIDER", "").lower().strip()
+
+    # Determine provider:
+    # 1. If TTS_PROVIDER is explicitly set, honor it.
+    # 2. If TTS_PROVIDER is empty, default to 'sarvam' if SARVAM_API_KEY is present, else 'edge-tts'.
+    if provider_env:
+        provider = provider_env
+    elif sarvam_key:
+        provider = "sarvam"
+    else:
+        provider = "edge-tts"
+
+    if provider == "sarvam":
+        return (
+            "sarvam",
+            os.getenv("TTS_MODEL", "bulbul:v4-flash"),
+            os.getenv("TTS_VOICE", "neha_mr_narration"),
+            sarvam_key or tts_key,
+        )
     if provider in ("edge-tts", "edge", "free", "microsoft"):
         return (
             "edge-tts",
@@ -54,17 +89,10 @@ def _tts_config():
             os.getenv("TTS_VOICE", "ta-IN-PallaviNeural"),
             "",
         )
-    if provider == "sarvam" or (sarvam_key and (not provider or provider == "sarvam")):
-        return (
-            "sarvam",
-            os.getenv("TTS_MODEL", "bulbul:v1"),
-            os.getenv("TTS_VOICE", "meera"),
-            sarvam_key or tts_key,
-        )
     return (
-        provider or "edge-tts",
-        os.getenv("TTS_MODEL", "edge-tts" if not tts_key else "magpie-tts-multilingual"),
-        os.getenv("TTS_VOICE", "ta-IN-PallaviNeural" if not tts_key else "mia"),
+        provider,
+        os.getenv("TTS_MODEL", "magpie-tts-multilingual" if tts_key else "edge-tts"),
+        os.getenv("TTS_VOICE", "mia" if tts_key else "ta-IN-PallaviNeural"),
         tts_key,
     )
 
@@ -141,28 +169,27 @@ async def synthesize_speech(text: str, voice: Optional[str] = None,
                             language: Optional[str] = None) -> bytes:
     """
     Text-to-Speech. Returns audio bytes (MP3/WAV depending on provider).
-    Defaults to free neural female voices (e.g. ta-IN-PallaviNeural).
+    Supports Sarvam Bulbul v4 Flash (Neha voice), Edge-TTS, and OpenAI/NVIDIA.
     """
     provider, model, default_voice, api_key = _tts_config()
     voice = voice or default_voice
     if not text or not text.strip():
         raise ValueError("No text provided for synthesis")
 
-    # If provider requires an API key but none is configured, fall back to free edge-tts
-    if provider not in ("edge-tts", "edge", "free", "microsoft") and not api_key:
-        logger.info("TTS key not set for '%s', falling back to free Edge-TTS", provider)
-        provider = "edge-tts"
-
     # Trim very long replies for snappier voice responses
     speak_text = text.strip()
     if len(speak_text) > 1200:
         speak_text = speak_text[:1200].rsplit(" ", 1)[0] + "..."
 
+    if provider == "sarvam":
+        if not api_key:
+            raise RuntimeError("Sarvam TTS API key is not configured (.env SARVAM_API_KEY)")
+        return await _tts_sarvam(api_key, model, voice, speak_text, language)
+
+    # For edge-tts or other optional providers
     try:
         if provider in ("edge-tts", "edge", "free", "microsoft"):
             return await _tts_edge(voice, speak_text, language)
-        elif provider == "sarvam":
-            return await _tts_sarvam(api_key, model, voice, speak_text, language)
         elif provider in ("nvidia", "openai"):
             base = (
                 "https://integrate.api.nvidia.com/v1"
@@ -193,17 +220,7 @@ async def _tts_edge(voice: Optional[str], text: str, language: Optional[str] = N
         has_tamil_script = any('\u0B80' <= c <= '\u0BFF' for c in text)
         selected_voice = "ta-IN-PallaviNeural" if has_tamil_script else "en-IN-NeerjaExpressiveNeural"
 
-    # Pre-clean speech text for warm, humanic, non-robotic pronunciation
-    import re
-    clean_speech = re.sub(r"\bLykAI\b", "Like AI", text)
-    clean_speech = re.sub(r"(\d+)BHK\b", r"\1 BHK", clean_speech)
-    clean_speech = re.sub(r"[*_#`~>\[\]\(\)]", " ", clean_speech)
-    # NOTE: use Python \U0001F600-style escapes — the JS-style \u{...} form
-    # raises re.error ("incomplete escape \u") in Python and broke ALL TTS.
-    clean_speech = re.sub(r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\u2600-\u26FF\u2700-\u27BF]", "", clean_speech)
-    clean_speech = re.sub(r"\s+", " ", clean_speech).strip()
-    if not clean_speech:
-        clean_speech = text
+    clean_speech = _clean_speech_text(text)
 
     communicate = edge_tts.Communicate(clean_speech, selected_voice, rate="+2%", pitch="+1Hz")
     chunks = []
@@ -216,36 +233,68 @@ async def _tts_edge(voice: Optional[str], text: str, language: Optional[str] = N
 
 
 async def _tts_sarvam(api_key: str, model: str, voice: str, text: str, language: Optional[str] = None) -> bytes:
-    """Sarvam AI Text-to-Speech API (bulbul:v1) with female voice (meera/pavithra/ananya)."""
+    """Sarvam AI Text-to-Speech API (bulbul:v4-flash) with Neha voice."""
     import base64
+    if not api_key:
+        raise RuntimeError("Sarvam TTS API key is not configured (SARVAM_API_KEY)")
+
+    clean_speech = _clean_speech_text(text)
+    if not clean_speech:
+        raise ValueError("No text provided for synthesis")
+
     url = "https://api.sarvam.ai/text-to-speech"
     headers = {
         "api-subscription-key": api_key,
         "Content-Type": "application/json",
     }
-    # Default to 'meera' (warm female voice)
-    speaker = voice if voice in ("meera", "pavithra", "ananya", "arvind", "amartya") else "meera"
-    # Target language code: ta-IN (Tamil) or en-IN (Indian English / Tanglish)
-    target_lang = "ta-IN" if language in ("ta", "ta-IN") else "en-IN"
+
+    # Target language code: en-IN (Indian English) initially; ta-IN for Tamil
+    has_tamil_script = any('\u0B80' <= c <= '\u0BFF' for c in clean_speech)
+    is_tamil = (language in ("ta", "ta-IN")) or has_tamil_script
+    target_lang = "ta-IN" if is_tamil else "en-IN"
+
+    # Default speaker: neha_mr_narration (Indian narration persona)
+    # Keep Tamil modular: never send Tamil text to Neha English/Marathi voice without notice.
+    speaker = voice or "neha_mr_narration"
+    if is_tamil and speaker == "neha_mr_narration":
+        speaker = os.getenv("TTS_VOICE_TAMIL", "gokul_ta_narration")
+
     payload = {
-        "inputs": [text],
+        "text": clean_speech,
+        "inputs": [clean_speech],
         "target_language_code": target_lang,
         "speaker": speaker,
-        "pitch": 0,
+        "model": model or "bulbul:v4-flash",
         "pace": 1.0,
-        "loudness": 1.5,
-        "speech_sample_rate": 22050,
+        "speech_sample_rate": 24000,
         "enable_preprocessing": True,
-        "model": model or "bulbul:v1",
     }
-    async with httpx.AsyncClient(timeout=_PROVIDER_TIMEOUT_SECONDS) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        audios = data.get("audios", [])
-        if not audios:
-            raise RuntimeError("Sarvam TTS returned empty audio response")
-        return base64.b64decode(audios[0])
+
+    try:
+        async with httpx.AsyncClient(timeout=_PROVIDER_TIMEOUT_SECONDS) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+
+            content_type = resp.headers.get("content-type", "").lower()
+            if "application/json" in content_type:
+                data = resp.json()
+                audios = data.get("audios")
+                if audios and len(audios) > 0 and audios[0]:
+                    return base64.b64decode(audios[0])
+                audio_b64 = data.get("audio") or data.get("audio_content")
+                if audio_b64:
+                    return base64.b64decode(audio_b64)
+                raise RuntimeError("Sarvam TTS returned empty audio in response")
+            else:
+                if not resp.content:
+                    raise RuntimeError("Sarvam TTS returned empty audio response")
+                return resp.content
+    except httpx.HTTPStatusError as e:
+        logger.error("Sarvam TTS HTTP %s: %s", e.response.status_code, e.response.text[:200])
+        raise RuntimeError(f"Sarvam TTS failed with status {e.response.status_code}") from e
+    except httpx.TimeoutException as e:
+        logger.error("Sarvam TTS request timed out")
+        raise RuntimeError("Sarvam TTS request timed out") from e
 
 
 async def _transcribe_sarvam(api_key: str, model: str, audio_bytes: bytes, filename: str, ext: str, language: Optional[str] = None) -> dict:

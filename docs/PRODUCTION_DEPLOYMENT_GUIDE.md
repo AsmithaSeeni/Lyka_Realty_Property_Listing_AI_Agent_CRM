@@ -57,8 +57,8 @@ documents the names only.
 | `LOGIN_LOCKOUT_THRESHOLD` | No | Default 8; clamped ≥ 1 (lockout cannot be disabled) |
 | `LOGIN_LOCKOUT_WINDOW_SECONDS` / `LOGIN_LOCKOUT_MINUTE_WINDOW` | No | Lockout tuning |
 | `STT_PROVIDER` / `STT_API_KEY` | No | Server STT endpoint (chat UI uses browser speech STT and works without these) |
-| `TTS_PROVIDER` / `TTS_VOICE` / `TTS_VOICES` / `EDGE_TTS_*` | No | Default `edge-tts` needs no key |
-| `SARVAM_API_KEY` + provider keys | No | Alternate STT/TTS |
+| `TTS_PROVIDER` / `TTS_MODEL` / `TTS_VOICE` | No | Default `sarvam` (with `SARVAM_API_KEY`), `bulbul:v4-flash`, `neha_mr_narration` |
+| `SARVAM_API_KEY` | Recommended | Sarvam AI API subscription key for Bulbul v4 Flash TTS (configure in Render Environment Variables) |
 | `OPENAI_API_KEY` | No | Staff lead-extraction endpoint |
 | `RATE_LIMIT_*` / `CHAT_RATE_LIMIT_*` | No | Tuning only (see health audit §7 for known limitations) |
 

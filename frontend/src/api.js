@@ -343,7 +343,7 @@ export const api = {
 
   // Voice — the chat UI records via the browser's SpeechRecognition (STT)
   // and speaks replies through these endpoints (TTS).
-  voiceRespond: (message, conversationId = null, speak = true, language = 'ta-Latn', voice = null) =>
+  voiceRespond: (message, conversationId = null, speak = true, language = 'en-IN', voice = null) =>
     req(
       '/api/voice/respond',
       {

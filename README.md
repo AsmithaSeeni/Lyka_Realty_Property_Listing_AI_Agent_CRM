@@ -831,16 +831,15 @@ STT_PROVIDER=groq          # or openai / nvidia
 STT_MODEL=whisper-large-v3-turbo
 STT_API_KEY=...            # must match the provider (gsk_... for Groq)
 
-TTS_PROVIDER=nvidia        # or openai
-TTS_MODEL=magpie-tts-multilingual
-TTS_VOICE=mia
-TTS_API_KEY=...
+TTS_PROVIDER=sarvam        # or edge-tts / nvidia / openai
+TTS_MODEL=bulbul:v4-flash
+TTS_VOICE=neha_mr_narration
+SARVAM_API_KEY=...
 ```
 
-> Note: keys must match their provider format. NVIDIA-hosted *chat* models are
-> available at `integrate.api.nvidia.com`; hosted TTS/STT endpoints require the
-> provider above to expose them (or a self-hosted NIM). The browser voice mode
-> is the recommended default and needs no keys.
+> Note: For high-quality Indian English speech synthesis, Sarvam AI's `bulbul:v4-flash`
+> model with `neha_mr_narration` voice is the primary TTS provider (24000 Hz sample rate, pace 1.0).
+> Free Edge-TTS (`ta-IN-PallaviNeural` / `en-IN-NeerjaExpressiveNeural`) is available as a zero-key alternative.
 
 ---
 
@@ -852,10 +851,10 @@ NVIDIA_MODEL=nvidia/nemotron-3.5-lightning-30b-a3b
 STT_PROVIDER=...
 STT_MODEL=...
 STT_API_KEY=...
-TTS_PROVIDER=...
-TTS_MODEL=...
-TTS_VOICE=...
-TTS_API_KEY=...
+TTS_PROVIDER=sarvam
+TTS_MODEL=bulbul:v4-flash
+TTS_VOICE=neha_mr_narration
+SARVAM_API_KEY=your_actual_key_here
 # Optional CRM seed overrides (defaults shown — development only; see below)
 SEED_ADMIN_EMAIL=admin@lykarealty.ae
 SEED_ADMIN_USERNAME=admin

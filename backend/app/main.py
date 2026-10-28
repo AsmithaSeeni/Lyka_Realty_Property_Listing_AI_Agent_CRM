@@ -503,7 +503,7 @@ def voice_respond(
             # TTS hint: "mixed" is not a synthesis language - a mixed reply's
             # spoken body is Tamil-dominant, so hint "ta" instead of dropping
             # the hint entirely (Phase 11 fix).
-            tts_language = result.get("reply_language") or result.get("detected_language") or "ta-Latn"
+            tts_language = result.get("reply_language") or result.get("detected_language") or "en-IN"
             if tts_language == "mixed":
                 tts_language = "ta"
             audio_bytes = asyncio.run(
@@ -528,7 +528,7 @@ class SynthesizeRequest(BaseModel):
         max_length=settings.SYNTHESIZE_TEXT_MAX_CHARS,  # Phase 1 input-length limit
     )
     voice: Optional[str] = Field(None, description="Voice name (default from .env)")
-    language: Optional[str] = Field(None, description="en | ta | ta-Latn")
+    language: Optional[str] = Field(None, description="en | ta | ta-Latn | en-IN | ta-IN")
 
 
 @app.post("/api/voice/synthesize")
@@ -551,11 +551,12 @@ async def voice_synthesize(
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    media_type = (
-        "audio/mpeg"
-        if audio.startswith(b"ID3") or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")
-        else "audio/wav"
-    )
+    if audio.startswith(b"RIFF"):
+        media_type = "audio/wav"
+    elif audio.startswith(b"ID3") or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        media_type = "audio/mpeg"
+    else:
+        media_type = "audio/wav"
     return RawResponse(content=audio, media_type=media_type)
 
 
