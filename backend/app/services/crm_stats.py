@@ -23,14 +23,18 @@ from app.services.followups import scoped_followup_query
 # to avoid a circular import with the route module; the routes validate
 # against their own set, tests assert the two agree).
 LEAD_STATUSES = (
-    "new", "contacted", "qualified", "viewing",
-    "negotiation", "closed_won", "closed_lost",
+    "new", "contact_pending", "contacted", "qualified", "viewing",
+    "negotiation", "closed_won", "closed_lost", "nurturing",
 )
 
 
-def dashboard_stats(db: Session, agent: Agent) -> Dict:
-    """Metrics for the CRM home. Empty database → all zeros."""
+def dashboard_stats(db: Session, agent: Agent, include_synthetic: bool = False) -> Dict:
+    """Metrics for the CRM home. Empty database → all zeros.
+    By default, synthetic benchmark records (is_synthetic == True) are excluded from genuine business KPIs.
+    """
     scoped = scoped_lead_query(db, agent)
+    if not include_synthetic:
+        scoped = scoped.filter(Lead.is_synthetic.is_(False))
 
     # --- status counts (one grouped query) -------------------------------
     status_rows = (
@@ -46,9 +50,27 @@ def dashboard_stats(db: Session, agent: Agent) -> Dict:
         # merge legacy/unknown/NULL statuses into their bucket (never drop)
         by_status[key] = by_status.get(key, 0) + count
 
-    counts = {"total": total, **by_status}
-    counts["closed"] = counts.get("closed_won", 0)   # friendly stat-card keys
-    counts["lost"] = counts.get("closed_lost", 0)
+    unassigned_count = (
+        scoped.filter(Lead.assigned_agent_id.is_(None))
+        .with_entities(func.count(Lead.id))
+        .scalar()
+        or 0
+    )
+    assigned_to_me = (
+        scoped.filter(Lead.assigned_agent_id == agent.id)
+        .with_entities(func.count(Lead.id))
+        .scalar()
+        or 0
+    )
+
+    counts = {
+        "total": total,
+        **by_status,
+        "closed": by_status.get("closed_won", 0),   # friendly stat-card keys
+        "lost": by_status.get("closed_lost", 0),
+        "unassigned": unassigned_count,
+        "assigned_to_me": assigned_to_me,
+    }
 
     # --- priority counts (one grouped query; NULL = never scored) --------
     priority_rows = (

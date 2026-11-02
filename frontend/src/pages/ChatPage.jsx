@@ -1,6 +1,7 @@
 import React from 'react'
 import { useNavigate, useParams, useSearchParams, Link } from 'react-router-dom'
 import api from '../api.js'
+import CanonicalPropertyCard from '../components/ui/PropertyCard.jsx'
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -11,14 +12,34 @@ const TAMIL_SCRIPT = /[஀-௿]/
    Tamil-script text gets the Tamil neural female voice, everything else
    (English / Tanglish latin) stays on the server default. */
 function pickTtsVoice(text) {
-  return TAMIL_SCRIPT.test(String(text || '')) ? 'ta-IN-PallaviNeural' : null
+  // Pass null to let backend route to configured Sarvam speaker (e.g. neha_mr_narration)
+  return null
 }
 
 function pickTtsLanguage(text) {
   return TAMIL_SCRIPT.test(String(text || '')) ? 'ta-IN' : 'en-IN'
 }
 
-const LANG_LABEL = { en: 'English', ta: 'தமிழ்', 'ta-Latn': 'Tanglish', mixed: 'Mixed' }
+const LANG_LABEL = {
+  en: 'English',
+  ta: 'தமிழ்',
+  'ta-Latn': 'Tanglish',
+  mixed: 'Mixed',
+  ar: 'العربية',
+  hi: 'हिन्दी',
+  'hi-Latn': 'Hinglish',
+  ml: 'മലയാളം',
+  te: 'తెలుగు',
+  fr: 'Français',
+  es: 'Español',
+  de: 'Deutsch',
+  ru: 'Русский',
+}
+
+const RTL_REGEX = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/
+function isRtlText(text) {
+  return Boolean(text && RTL_REGEX.test(text))
+}
 
 function fmtTime(iso) {
   try {
@@ -29,58 +50,33 @@ function fmtTime(iso) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Property card — rendered inline inside the conversation, right under */
-/* the LykAI reply that recommended it. Shows ONLY fields the backend   */
-/* actually returned — never invented data.                             */
+/* Property card — canonical enterprise card rendered inline in chat   */
 /* ------------------------------------------------------------------ */
 function PropertyCard({ prop, index, onOpen }) {
-  const beds = prop.no__of__beds ?? prop.bedrooms ?? '—'
-  const baths = prop.no_of_baths ?? prop.bathrooms ?? '—'
-  const price = prop.price
-  const loc = prop.location || ''
-  const type = prop.property_type || 'Property'
-  const emoji =
-    /villa/i.test(type) ? '🏡' :
-      /townhouse/i.test(type) ? '🏘️' :
-        /penthouse/i.test(type) ? '🌆' :
-          /studio/i.test(String(beds)) ? '🏠' :
-            /plot|land/i.test(type) ? '🗺️' : '🏢'
-
-  const highlights = String(prop.highlights || '')
-    .split(/[;,]|\n/)
-    .map((h) => h.trim())
-    .filter((h) => h.length > 3)
-    .slice(0, 2)
-
-  const clickable = Boolean(prop.property_id || prop.property_record_id)
+  const clickable = Boolean(prop.property_id || prop.property_record_id || prop.id)
 
   return (
-    <div className="pcard">
-      <div className="pcard-top">
-        <span className="pcard-emoji" aria-hidden="true">{emoji}</span>
-        <div className="pcard-head">
-          <div className="pcard-price">
-            {price != null && price !== '' ? `AED ${price}` : 'Price on request'}
-          </div>
-          <div className="pcard-title">{type}{loc ? ` · ${loc}` : ''}</div>
-        </div>
-        {index != null && (
-          <span className="pcard-num" title={`Recommendation ${index}`}>{index}</span>
-        )}
-      </div>
-      <div className="pcard-specs">
-        <span>Bedrooms {beds}</span>
-        <span>Bathrooms {baths}</span>
-        <span>{prop.area ? `Area ${prop.area}` : 'Area —'}</span>
-      </div>
-      {highlights.length > 0 && (
-        <div className="pcard-high">{highlights.join(' · ')}</div>
-      )}
-      {clickable && (
-        <button className="pcard-cta" onClick={() => onOpen(prop)}>
-          View property details
-        </button>
-      )}
+    <div style={{ maxWidth: 360, margin: '10px 0' }}>
+      <CanonicalPropertyCard
+        property={prop}
+        variant="chat"
+        index={index}
+        onSelect={clickable ? () => onOpen(prop) : null}
+        actions={
+          clickable ? (
+            <button
+              className="btn gold btn-sm"
+              style={{ width: '100%', marginTop: 2 }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onOpen(prop)
+              }}
+            >
+              View Property Details
+            </button>
+          ) : null
+        }
+      />
     </div>
   )
 }
@@ -174,14 +170,32 @@ async function playBackendAudio(text, lang = 'en-IN', voice = null) {
   try {
     stopActivePlayback()
     const res = await api.synthesize(text, lang, voice)
-    if (!res || !res.ok) return false
-    const blob = await res.blob()
-    if (!blob || blob.size < 300) return false
-    const url = URL.createObjectURL(blob)
-    return playAudioSrc(url, { revokeUrl: true })
-  } catch {
-    return false
+    if (res && res.ok) {
+      const blob = await res.blob()
+      if (blob && blob.size >= 300) {
+        const url = URL.createObjectURL(blob)
+        const played = await playAudioSrc(url, { revokeUrl: true })
+        if (played) return true
+      }
+    }
+  } catch (err) {
+    console.warn('Backend speech synthesis notice:', err)
   }
+
+  // Resilient browser fallback so the assistant never goes silent
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    try {
+      window.speechSynthesis.cancel()
+      const u = new SpeechSynthesisUtterance(cleanSpeechText(text))
+      u.lang = lang || 'en-IN'
+      u.rate = 1.05
+      window.speechSynthesis.speak(u)
+      return true
+    } catch {
+      return false
+    }
+  }
+  return false
 }
 
 /* Clean speech text: strip internal notes, markdown and emoji. */
@@ -232,6 +246,14 @@ export default function ChatPage() {
   const [micBlocked, setMicBlocked] = React.useState(false) // permission denied
   const [speakingKey, setSpeakingKey] = React.useState(null) // message currently being read aloud
   const [hasLastReply, setHasLastReply] = React.useState(false)
+  const [ttsNotice, setTtsNotice] = React.useState(null)
+
+  React.useEffect(() => {
+    if (ttsNotice) {
+      const t = setTimeout(() => setTtsNotice(null), 5000)
+      return () => clearTimeout(t)
+    }
+  }, [ttsNotice])
 
   const recognitionRef = React.useRef(null)
   const stopVoiceRef = React.useRef(false)
@@ -427,17 +449,8 @@ export default function ChatPage() {
     setSpeakingKey(key)
     const lang = pickTtsLanguage(cleanText)
     let ok = await playBackendAudio(cleanText, lang, pickTtsVoice(cleanText))
-    if (!ok && window.speechSynthesis) {
-      try {
-        window.speechSynthesis.cancel()
-        const utterance = new SpeechSynthesisUtterance(cleanText)
-        utterance.lang = lang
-        ok = await new Promise((resolve) => {
-          utterance.onend = () => resolve(true)
-          utterance.onerror = () => resolve(false)
-          window.speechSynthesis.speak(utterance)
-        })
-      } catch { /* noop */ }
+    if (!ok) {
+      setTtsNotice("Voice output temporarily unavailable — continuing in text")
     }
     setSpeakingKey(null)
     return ok
@@ -515,17 +528,8 @@ export default function ChatPage() {
               if (cleanText) {
                 const lang = pickTtsLanguage(cleanText)
                 played = await playBackendAudio(cleanText, lang, pickTtsVoice(cleanText))
-                if (!played && window.speechSynthesis) {
-                  try {
-                    window.speechSynthesis.cancel()
-                    const utterance = new SpeechSynthesisUtterance(cleanText)
-                    utterance.lang = lang
-                    await new Promise((resolve) => {
-                      utterance.onend = () => resolve(true)
-                      utterance.onerror = () => resolve(false)
-                      window.speechSynthesis.speak(utterance)
-                    })
-                  } catch { /* noop */ }
+                if (!played) {
+                  setTtsNotice("Voice output temporarily unavailable — continuing in text")
                 }
               }
             }
@@ -680,17 +684,8 @@ export default function ChatPage() {
       if (cleanText) {
         const lang = pickTtsLanguage(cleanText)
         played = await playBackendAudio(cleanText, lang, pickTtsVoice(cleanText))
-        if (!played && window.speechSynthesis) {
-          try {
-            window.speechSynthesis.cancel()
-            const utterance = new SpeechSynthesisUtterance(cleanText)
-            utterance.lang = lang
-            await new Promise((resolve) => {
-              utterance.onend = () => resolve(true)
-              utterance.onerror = () => resolve(false)
-              window.speechSynthesis.speak(utterance)
-            })
-          } catch { /* noop */ }
+        if (!played) {
+          setTtsNotice("Voice output temporarily unavailable — continuing in text")
         }
       }
     }
@@ -830,6 +825,12 @@ export default function ChatPage() {
                 : 'Reconnecting to LykAI… you can keep typing; sending may fail briefly.'}
             </div>
           )}
+          {ttsNotice && (
+            <div className="lyk-banner" style={{ background: '#fef3c7', color: '#92400e', borderColor: '#fde68a' }} role="status">
+              <span>ℹ️ {ttsNotice}</span>
+              <button className="lyk-banner__x" aria-label="Dismiss message" onClick={() => setTtsNotice(null)}>✕</button>
+            </div>
+          )}
           {error && (
             <div className="lyk-banner error" role="alert">
               <span>⚠️ {error}</span>
@@ -867,7 +868,12 @@ export default function ChatPage() {
                   {m.role === 'user' ? 'You' : 'LY'}
                 </div>
                 <div className="msg-body">
-                  <div className="bubble">{m.content}</div>
+                  <div
+                    className={`bubble ${isRtlText(m.content) ? 'rtl-bubble' : ''}`}
+                    dir={isRtlText(m.content) ? 'rtl' : 'ltr'}
+                  >
+                    {m.content}
+                  </div>
                   {/* Property cards belong to this reply — part of the answer */}
                   {m.properties?.length > 0 && (
                     <div className="msg-cards">
@@ -1003,20 +1009,25 @@ export default function ChatPage() {
           </button>
 
           <div className="voice-status" aria-live="polite">
-            {voiceState === 'listening' && 'Listening… speak in Tanglish or English'}
-            {voiceState === 'processing' && 'Thinking…'}
-            {voiceState === 'speaking' && 'Speaking…'}
-            {voiceState === 'idle' && (micBlocked ? 'Microphone blocked' : 'Voice mode ready')}
+            {voiceState === 'listening' && 'Listening… speak naturally in English, Tamil, or Tanglish'}
+            {voiceState === 'processing' && 'LykAI is analyzing your request…'}
+            {voiceState === 'speaking' && 'LykAI is speaking…'}
+            {voiceState === 'idle' && (micBlocked ? 'Microphone blocked' : 'Tap the gold orb to start speaking')}
           </div>
 
           <div className="lyk-orb-wrap">
             <div
               className={`voice-orb ${voiceState === 'listening' ? 'listening' : voiceState === 'speaking' ? 'speaking' : ''}`}
               aria-hidden="true"
+              onClick={() => {
+                if (voiceState === 'listening') stopVoice()
+                else if (voiceState === 'idle' && !micBlocked) listenOnce()
+              }}
+              title={voiceState === 'listening' ? 'Click to pause listening' : 'Click to speak'}
             >
-              {voiceState === 'speaking' ? '🔊' : voiceState === 'processing' ? '🧠' : '🎙️'}
+              {voiceState === 'speaking' ? '🔊' : voiceState === 'processing' ? '✨' : '🎙️'}
             </div>
-            {/* Waveform — only while actually listening or speaking */}
+            {/* Refined wave equalizer */}
             {(voiceState === 'listening' || voiceState === 'speaking') && (
               <div className="lyk-wave" aria-hidden="true">
                 <i /><i /><i /><i /><i /><i /><i />
@@ -1027,12 +1038,24 @@ export default function ChatPage() {
           <div className="voice-transcript-live" aria-live="polite">
             {liveTranscript ||
               (voiceState === 'listening'
-                ? 'Go ahead — I’m listening…'
+                ? 'Listening to your voice… go ahead'
                 : voiceState === 'processing'
-                  ? 'One moment…'
-                  : '…')}
+                  ? 'Finding matching properties & formulating response…'
+                  : 'Tap the gold microphone to speak')}
           </div>
 
+          {ttsNotice && (
+            <div className="lyk-voice__notice" role="status">
+              <span>🎙️ {ttsNotice}</span>
+              <button
+                type="button"
+                onClick={() => setTtsNotice(null)}
+                style={{ background: 'transparent', border: 'none', color: '#e8bd68', cursor: 'pointer', fontSize: 13, fontWeight: 700 }}
+              >
+                ✕
+              </button>
+            </div>
+          )}
           {micBlocked && (
             <div className="lyk-voice__notice" role="alert">
               <b>Microphone access was denied.</b>

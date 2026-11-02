@@ -38,6 +38,95 @@ USER_CREATED = "user.created"
 USER_UPDATED = "user.updated"
 PASSWORD_RESET = "user.password.reset"
 AUDIT_READ = "audit.read"
+PROPERTY_CREATED = "property.created"
+PROPERTY_UPDATED = "property.updated"
+PROPERTY_APPROVED = "property.approved"
+PROPERTY_UNAPPROVED = "property.unapproved"
+PROPERTY_ARCHIVED = "property.archived"
+PROPERTY_DELETED = "property.deleted"
+PROPERTY_IMPORTED = "property.imported"
+LEAD_CREATED = "lead.created"
+LEAD_UPDATED = "lead.updated"
+LEAD_STATUS_CHANGED = "lead.status.changed"
+LEAD_REOPENED = "lead.reopened"
+LEAD_QUALIFIED = "lead.qualified"
+LEAD_ASSIGNED = "lead.assigned"
+LEAD_UNASSIGNED = "lead.unassigned"
+LEAD_ROUND_ROBIN_ASSIGNED = "lead.assigned.round_robin"
+LEAD_MERGED = "lead.merged"
+LEAD_PROPERTY_LINKED = "lead.property.linked"
+LEAD_PROPERTY_UNLINKED = "lead.property.unlinked"
+FOLLOWUP_CREATED = "followup.created"
+FOLLOWUP_UPDATED = "followup.updated"
+FOLLOWUP_COMPLETED = "followup.completed"
+FOLLOWUP_CANCELLED = "followup.cancelled"
+APPOINTMENT_CREATED = "appointment.created"
+APPOINTMENT_UPDATED = "appointment.updated"
+APPOINTMENT_RESCHEDULED = "appointment.rescheduled"
+APPOINTMENT_CANCELLED = "appointment.cancelled"
+APPOINTMENT_COMPLETED = "appointment.completed"
+APPOINTMENT_NO_SHOW = "appointment.no_show"
+VIEWING_OUTCOME_RECORDED = "viewing.outcome.recorded"
+OFFER_CREATED = "offer.created"
+OFFER_SUBMITTED = "offer.submitted"
+OFFER_COUNTERED = "offer.countered"
+OFFER_ACCEPTED = "offer.accepted"
+OFFER_REJECTED = "offer.rejected"
+OFFER_WITHDRAWN = "offer.withdrawn"
+OFFER_EXPIRED = "offer.expired"
+DEAL_CREATED = "deal.created"
+DEAL_UPDATED = "deal.updated"
+DEAL_STAGE_CHANGED = "deal.stage.changed"
+DEAL_COMPLETED = "deal.completed"
+DEAL_CANCELLED = "deal.cancelled"
+DEAL_FAILED = "deal.failed"
+DEAL_COMMISSION_VERIFIED = "deal.commission.verified"
+DEAL_CHECKLIST_UPDATED = "deal.checklist.updated"
+DEAL_CHECKLIST_VERIFIED = "deal.checklist.verified"
+ANALYTICS_EXPORTED = "analytics.exported"
+PROPERTY_SUBMITTED_FOR_REVIEW = "property.submitted_for_review"
+PROPERTY_REJECTED = "property.rejected"
+PROPERTY_PUBLISHED = "property.published"
+PROPERTY_UNPUBLISHED = "property.unpublished"
+PROPERTY_IMAGES_UPDATED = "property.images_updated"
+PROPERTY_AVAILABILITY_CHANGED = "property.availability_changed"
+PROPERTY_IMPORT_BATCH_STAGED = "property.import_batch_staged"
+
+
+def record_audit_log(
+    db: Session,
+    *,
+    actor_type: Optional[str] = None,
+    actor_id: Optional[int] = None,
+    actor_label: Optional[str] = None,
+    action: Optional[str] = None,
+    event: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    subject_type: Optional[str] = None,
+    resource_id: Optional[int] = None,
+    subject_id: Optional[int] = None,
+    subject_label: Optional[str] = None,
+    details: Optional[dict] = None,
+    detail: Optional[str] = None,
+    ip: Optional[str] = None,
+):
+    import json
+    ev = event or action or "general"
+    st = subject_type or resource_type
+    sid = subject_id or resource_id
+    det = detail or (json.dumps(details) if details else None)
+    return write_audit(
+        db,
+        ev,
+        actor_type=actor_type,
+        actor_id=actor_id,
+        actor_label=actor_label,
+        subject_type=st,
+        subject_id=sid,
+        subject_label=subject_label,
+        ip=ip,
+        detail=det,
+    )
 
 
 def write_audit(

@@ -246,6 +246,29 @@ export const api = {
       credentials: 'same-origin',
       body: JSON.stringify({ suspend, current_password: currentPassword }),
     }),
+  adminAgents: () => req('/api/admin/agents', { credentials: 'same-origin' }),
+  adminAgentDetail: (id) => req('/api/admin/agents/' + id, { credentials: 'same-origin' }),
+  adminCreateAgent: (data) =>
+    req('/api/admin/agents', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  adminResetAgentPassword: (id, data = {}) =>
+    req('/api/admin/agents/' + id + '/reset-password', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  adminUpdateAgentStatus: (id, is_active) =>
+    req('/api/admin/agents/' + id + '/status', {
+      method: 'PATCH',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ is_active }),
+    }),
   auditLog: (params = {}) => {
     const qs = new URLSearchParams()
     Object.entries(params).forEach(([k, v]) => {
@@ -330,6 +353,212 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  // ---- Phase E: Lifecycle, Assignment, Duplicate Merge & Property Linking ----
+  agentSalesAgents: () =>
+    req('/api/agent/sales-agents', { credentials: 'same-origin' }),
+  transitionLeadStatus: (leadId, data) =>
+    req(`/api/agent/leads/${leadId}/status`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  assignAgentLead: (leadId, data) =>
+    req(`/api/agent/leads/${leadId}/assign`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  agentLeadDuplicates: (leadId) =>
+    req(`/api/agent/leads/${leadId}/duplicates`, { credentials: 'same-origin' }),
+  mergeAgentLead: (leadId, data) =>
+    req(`/api/agent/leads/${leadId}/merge`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  linkLeadProperty: (leadId, data) =>
+    req(`/api/agent/leads/${leadId}/properties`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  unlinkLeadProperty: (leadId, recId) =>
+    req(`/api/agent/leads/${leadId}/properties/${recId}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    }),
+  agentLeadActivity: (leadId, params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(
+      `/api/agent/leads/${leadId}/activity${suffix ? `?${suffix}` : ''}`,
+      { credentials: 'same-origin' },
+    )
+  },
+  cancelAgentFollowUp: (id, reason = null) =>
+    req(`/api/agent/follow-ups/${id}/cancel`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
+
+  // ---- Phase F: Appointments, Viewings, Offers, Negotiations & Deals ----
+  agentSalesOpsSummary: () =>
+    req('/api/agent/sales-ops/summary', { credentials: 'same-origin' }),
+
+  agentAppointments: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(`/api/agent/appointments${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' })
+  },
+  agentAppointment: (id) =>
+    req(`/api/agent/appointments/${id}`, { credentials: 'same-origin' }),
+  createAgentAppointment: (data) =>
+    req('/api/agent/appointments', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  createLeadAppointment: (leadId, data) =>
+    req(`/api/agent/leads/${leadId}/appointments`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  updateAgentAppointment: (id, data) =>
+    req(`/api/agent/appointments/${id}`, {
+      method: 'PATCH',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  rescheduleAgentAppointment: (id, data) =>
+    req(`/api/agent/appointments/${id}/reschedule`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  cancelAgentAppointment: (id, data) =>
+    req(`/api/agent/appointments/${id}/cancel`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  recordAgentAppointmentOutcome: (id, data) =>
+    req(`/api/agent/appointments/${id}/outcome`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+
+  agentOffers: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(`/api/agent/offers${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' })
+  },
+  agentOffer: (id) =>
+    req(`/api/agent/offers/${id}`, { credentials: 'same-origin' }),
+  createAgentOffer: (data) =>
+    req('/api/agent/offers', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  createLeadOffer: (leadId, data) =>
+    req(`/api/agent/leads/${leadId}/offers`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  counterAgentOffer: (id, data) =>
+    req(`/api/agent/offers/${id}/counter`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  transitionAgentOfferStatus: (id, data) =>
+    req(`/api/agent/offers/${id}/status`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+
+  agentDeals: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(`/api/agent/deals${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' })
+  },
+  agentDeal: (id) =>
+    req(`/api/agent/deals/${id}`, { credentials: 'same-origin' }),
+  createAgentDeal: (data) =>
+    req('/api/agent/deals', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  createLeadDeal: (leadId, data) =>
+    req(`/api/agent/leads/${leadId}/deals`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  updateAgentDeal: (id, data) =>
+    req(`/api/agent/deals/${id}`, {
+      method: 'PATCH',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  transitionAgentDealStage: (id, data) =>
+    req(`/api/agent/deals/${id}/stage`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  addDealChecklistItem: (dealId, data) =>
+    req(`/api/agent/deals/${dealId}/checklist`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  updateDealChecklistItem: (dealId, itemId, data) =>
+    req(`/api/agent/deals/${dealId}/checklist/${itemId}`, {
+      method: 'PATCH',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+
   agentConversations: (params = {}) => {
     const qs = new URLSearchParams()
     Object.entries(params).forEach(([k, v]) => {
@@ -340,6 +569,140 @@ export const api = {
   },
   agentConversation: (id) =>
     req(`/api/agent/conversations/${id}`, { credentials: 'same-origin' }),
+
+  // ---- Staff & Admin Property Inventory Management (Phase D) ----
+  agentProperties: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(`/api/agent/properties${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' })
+  },
+  agentProperty: (id) =>
+    req(`/api/agent/properties/${id}`, { credentials: 'same-origin' }),
+  createAgentProperty: (data) =>
+    req('/api/agent/properties', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  updateAgentProperty: (id, data) =>
+    req(`/api/agent/properties/${id}`, {
+      method: 'PATCH',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(data),
+    }),
+  archiveAgentProperty: (id) =>
+    req(`/api/agent/properties/${id}/archive`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+    }),
+  deleteAgentProperty: (id) =>
+    req(`/api/agent/properties/${id}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    }),
+
+  // Phase I: Property Lifecycle, Verification & Batch Import
+  submitPropertyForReview: (id) =>
+    req(`/api/agent/properties/${id}/submit-review`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+    }),
+  approveProperty: (id) =>
+    req(`/api/admin/properties/${id}/approve`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+    }),
+  rejectProperty: (id, reason) =>
+    req(`/api/admin/properties/${id}/reject`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ reason }),
+    }),
+  publishProperty: (id) =>
+    req(`/api/admin/properties/${id}/publish`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+    }),
+  unpublishProperty: (id) =>
+    req(`/api/admin/properties/${id}/unpublish`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+    }),
+  updatePropertyImages: (id, images, primaryImage) =>
+    req(`/api/admin/properties/${id}/images`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ images, primary_image: primaryImage }),
+    }),
+  uploadPropertyImage: (id, file, { isPrimary = false, altText = '', displayOrder = null } = {}) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    if (isPrimary) fd.append('is_primary', 'true')
+    if (altText) fd.append('alt_text', altText)
+    if (displayOrder !== null) fd.append('display_order', String(displayOrder))
+    return req(`/api/admin/properties/${id}/images/upload`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: fd,
+    }, 60000)
+  },
+  getPropertyImages: (id) => req(`/api/properties/${id}/images`),
+  setPropertyPrimaryImage: (propertyId, imageId) =>
+    req(`/api/admin/properties/${propertyId}/images/${imageId}/primary`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+    }),
+  deletePropertyImage: (propertyId, imageId) =>
+    req(`/api/admin/properties/${propertyId}/images/${imageId}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    }),
+  bulkPropertyAction: (propertyIds, action, reason = null) =>
+    req('/api/admin/properties/bulk-action', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ property_ids: propertyIds, action, reason }),
+    }),
+  previewPropertyImport: (records) =>
+    req('/api/admin/properties/import-preview', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ records }),
+    }),
+  stagePropertyImport: (records, source = 'uae_dataset', filename = null, skipDuplicates = true, dryRun = false) =>
+    req('/api/admin/properties/import-batch', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify({ records, source, filename, skip_duplicates: skipDuplicates, dry_run: dryRun }),
+    }),
+  listImportBatches: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(`/api/admin/properties/import-batches${suffix ? `?${suffix}` : ''}`, {
+      credentials: 'same-origin',
+    })
+  },
+  getImportBatch: (batchId) =>
+    req(`/api/admin/properties/import-batches/${batchId}`, { credentials: 'same-origin' }),
 
   // Voice — the chat UI records via the browser's SpeechRecognition (STT)
   // and speaks replies through these endpoints (TTS).
@@ -371,6 +734,290 @@ export const api = {
       headers: JSON_HEADERS,
       signal: timeoutSignal(AI_TIMEOUT_MS),
       body: JSON.stringify({ text, language, ...(voice ? { voice } : {}) }),
+    }),
+
+  // ---- Phase G: Executive Dashboards & Analytics ----
+  analyticsExecutive: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(`/api/analytics/executive${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' })
+  },
+  analyticsManager: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(`/api/analytics/manager${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' })
+  },
+  analyticsAgent: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(`/api/analytics/agent${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' })
+  },
+  analyticsExportAgentsUrl: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return `/api/analytics/export/agents${suffix ? `?${suffix}` : ''}`
+  },
+
+  // ---- Phase H: Customer Portal, Viewing Requests, Communications & Notifications ----
+  customerProfile: () =>
+    req('/api/customer/profile', { credentials: 'same-origin' }),
+  customerUpdateProfile: (payload) =>
+    req('/api/customer/profile', {
+      method: 'PUT',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    }),
+  customerChangePassword: (payload) =>
+    req('/api/customer/change-password', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    }),
+  customerDashboard: () =>
+    req('/api/customer/dashboard', { credentials: 'same-origin' }),
+  customerAppointments: () =>
+    req('/api/customer/appointments', { credentials: 'same-origin' }),
+  customerRequestViewing: (payload) =>
+    req('/api/customer/appointments/request', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    }),
+  customerRescheduleViewing: (id, payload) =>
+    req(`/api/customer/appointments/${id}/reschedule-request`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    }),
+  customerCancelViewing: (id, payload = {}) =>
+    req(`/api/customer/appointments/${id}/cancel`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    }),
+  customerCommunications: (appointmentId = null) => {
+    const qs = appointmentId ? `?appointment_id=${appointmentId}` : ''
+    return req(`/api/customer/communications${qs}`, { credentials: 'same-origin' })
+  },
+  customerSendCommunication: (payload) =>
+    req('/api/customer/communications', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    }),
+  customerNotifications: () =>
+    req('/api/customer/notifications', { credentials: 'same-origin' }),
+  customerMarkNotificationRead: (id) =>
+    req(`/api/customer/notifications/${id}/read`, {
+      method: 'POST',
+      credentials: 'same-origin',
+    }),
+  customerMarkAllNotificationsRead: () =>
+    req('/api/customer/notifications/mark-all-read', {
+      method: 'POST',
+      credentials: 'same-origin',
+    }),
+
+  // Agent viewing queue & customer management
+  agentViewingRequests: (status = null) => {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : ''
+    return req(`/api/agent/viewing-requests${qs}`, { credentials: 'same-origin' })
+  },
+  agentAcceptViewingRequest: (id, payload = {}) =>
+    req(`/api/agent/appointments/${id}/accept-request`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    }),
+  agentRejectViewingRequest: (id, payload) =>
+    req(`/api/agent/appointments/${id}/reject-request`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    }),
+  agentCustomers: (params = {}) => {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, v)
+    })
+    const suffix = qs.toString()
+    return req(`/api/agent/customers${suffix ? `?${suffix}` : ''}`, { credentials: 'same-origin' })
+  },
+  agentCustomerDetail: (id) =>
+    req(`/api/agent/customers/${id}`, { credentials: 'same-origin' }),
+  agentAddCustomerCommunication: (id, payload) =>
+    req(`/api/agent/customers/${id}/communications`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    }),
+  agentNotifications: () =>
+    req('/api/agent/notifications', { credentials: 'same-origin' }),
+  agentMarkNotificationRead: (id) =>
+    req(`/api/agent/notifications/${id}/read`, {
+      method: 'POST',
+      credentials: 'same-origin',
+    }),
+  agentMarkAllNotificationsRead: () =>
+    req('/api/agent/notifications/mark-all-read', {
+      method: 'POST',
+      credentials: 'same-origin',
+    }),
+
+  // ---- Stage 6J: HR Management & Attendance ----
+  hrDashboard: (date) =>
+    req(`/api/hr/dashboard${date ? `?date=${encodeURIComponent(date)}` : ""}`, { credentials: "same-origin" }),
+  hrEmployees: (params = {}) => {
+    const q = new URLSearchParams()
+    if (params.department) q.set("department", params.department)
+    if (params.status) q.set("status", params.status)
+    if (params.q) q.set("q", params.q)
+    if (params.limit) q.set("limit", params.limit)
+    if (params.offset) q.set("offset", params.offset)
+    const qs = q.toString()
+    return req(`/api/hr/employees${qs ? `?${qs}` : ""}`, { credentials: "same-origin" })
+  },
+  hrCreateEmployee: (payload) =>
+    req("/api/hr/employees", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  hrEmployee: (id) =>
+    req(`/api/hr/employees/${id}`, { credentials: "same-origin" }),
+  hrUpdateEmployee: (id, payload) =>
+    req(`/api/hr/employees/${id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  hrDeactivateEmployee: (id, reason) =>
+    req(`/api/hr/employees/${id}/deactivate`, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify({ reason }),
+    }),
+  hrResetEmployeePassword: (id, payload = {}) =>
+    req(`/api/hr/employees/${id}/reset-password`, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  hrUpdateEmployeeAccount: (id, payload) =>
+    req(`/api/hr/employees/${id}/account`, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  hrLinkEmployeeAccount: (id, payload = {}) =>
+    req(`/api/hr/employees/${id}/link-account`, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  hrAttendance: (params = {}) => {
+    const q = new URLSearchParams()
+    if (params.date_from) q.set("date_from", params.date_from)
+    if (params.date_to) q.set("date_to", params.date_to)
+    if (params.employee_id) q.set("employee_id", params.employee_id)
+    if (params.department) q.set("department", params.department)
+    if (params.status) q.set("status", params.status)
+    if (params.limit) q.set("limit", params.limit)
+    if (params.offset) q.set("offset", params.offset)
+    const qs = q.toString()
+    return req(`/api/hr/attendance${qs ? `?${qs}` : ""}`, { credentials: "same-origin" })
+  },
+  hrCorrectAttendance: (payload) =>
+    req("/api/hr/attendance/correct", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  hrLeaveRequests: (params = {}) => {
+    const q = new URLSearchParams()
+    if (params.employee_id) q.set("employee_id", params.employee_id)
+    if (params.status) q.set("status", params.status)
+    if (params.limit) q.set("limit", params.limit)
+    if (params.offset) q.set("offset", params.offset)
+    const qs = q.toString()
+    return req(`/api/hr/leave-requests${qs ? `?${qs}` : ""}`, { credentials: "same-origin" })
+  },
+  hrReviewLeave: (id, payload) =>
+    req(`/api/hr/leave-requests/${id}/review`, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  agentAttendanceToday: () =>
+    req("/api/agent/attendance/today", { credentials: "same-origin" }),
+  agentCheckIn: (payload = {}) =>
+    req("/api/agent/attendance/check-in", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  agentCheckOut: (payload = {}) =>
+    req("/api/agent/attendance/check-out", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  agentSubmitLeave: (payload) =>
+    req("/api/agent/leave-requests", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }),
+  agentOwnLeaveRequests: (params = {}) => {
+    const q = new URLSearchParams()
+    if (params.status) q.set("status", params.status)
+    if (params.limit) q.set("limit", params.limit)
+    const qs = q.toString()
+    return req(`/api/agent/leave-requests${qs ? `?${qs}` : ""}`, { credentials: "same-origin" })
+  },
+  agentCancelLeave: (id) =>
+    req(`/api/agent/leave-requests/${id}/cancel`, {
+      method: "POST",
+      credentials: "same-origin",
+    }),
+  changePassword: (payload) =>
+    req('/api/auth/change-password', {
+      method: 'POST',
+      headers: JSON_HEADERS,
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
     }),
 }
 

@@ -194,6 +194,53 @@ def search_properties(
     Runs against a precomputed index of parsed values (price/beds/area and
     lowercased strings), so no string parsing happens inside the 25k-row loop.
     """
+    # 1. Primary path: query PostgreSQL database if db session is provided
+    if db is not None:
+        try:
+            q = db.query(Property).filter(Property.source.in_(["uae_dataset", "dataset"]))
+            if location:
+                q = q.filter(Property.location.ilike(f"%{location.strip()}%"))
+            if property_type:
+                q = q.filter(Property.property_type.ilike(f"%{property_type.strip()}%"))
+            if min_price is not None:
+                q = q.filter(Property.price >= min_price)
+            if max_price is not None:
+                q = q.filter(Property.price <= max_price)
+            if min_bedrooms is not None:
+                q = q.filter(Property.bedrooms >= min_bedrooms)
+            if max_bedrooms is not None:
+                q = q.filter(Property.bedrooms <= max_bedrooms)
+
+            db_total = q.count()
+            if db_total > 0:
+                db_rows = q.order_by(Property.id.asc()).offset(offset).limit(limit).all()
+                out_results = []
+                for row in db_rows:
+                    pid = row.id
+                    if row.external_ref and row.external_ref.startswith("UAE-"):
+                        try:
+                            pid = int(row.external_ref.split("-", 1)[1])
+                        except ValueError:
+                            pid = row.id
+                    out_results.append({
+                        "property_id": pid,
+                        "price": f"{int(row.price):,}" if row.price else "",
+                        "property_type": row.property_type,
+                        "no__of__beds": str(row.bedrooms) if row.bedrooms else "Studio",
+                        "no_of_baths": float(row.bathrooms) if row.bathrooms else 1.0,
+                        "area": f"{int(row.area):,} sqft" if row.area else "",
+                        "highlights": row.highlights or row.title,
+                        "location": row.location,
+                    })
+                return {
+                    "results": out_results,
+                    "total": db_total,
+                    "limit": limit,
+                    "offset": offset,
+                }
+        except Exception as e:
+            logger.warning("search_properties: DB query failed (%s), falling back to index", e)
+
     if _search_index is None:
         load_properties()
 
@@ -403,6 +450,8 @@ def search_property_records(
     purpose: Optional[str] = None,
     availability: Optional[object] = "available",
     approved_only: bool = True,
+    published_only: bool = False,
+    is_demo: Optional[bool] = False,
     location: Optional[str] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
@@ -473,6 +522,10 @@ def search_property_records(
     # --- approval: eligible recommendations are approved-only (default) ---
     if approved_only:
         query = query.filter(Property.is_approved.is_(True))
+    if published_only:
+        query = query.filter(Property.is_published.is_(True))
+    if is_demo is not None:
+        query = query.filter(Property.is_demo.is_(bool(is_demo)))
 
     # --- location / community: case-insensitive containment -------------
     if location:
@@ -565,6 +618,14 @@ def public_record_dict(prop: "Property") -> Dict[str, Any]:
             amenities = [str(a) for a in parsed]
     except (TypeError, ValueError):
         amenities = []
+    images_list = []
+    try:
+        parsed_img = json.loads(getattr(prop, "images", "[]") or "[]")
+        if isinstance(parsed_img, list):
+            images_list = parsed_img
+    except Exception:
+        images_list = []
+
     return {
         "id": prop.id,
         "title": prop.title,
@@ -581,6 +642,8 @@ def public_record_dict(prop: "Property") -> Dict[str, Any]:
         "area_unit": prop.area_unit or "sqft",
         "amenities": amenities,
         "highlights": prop.highlights or "",
+        "images": images_list,
+        "primary_image": getattr(prop, "primary_image", None) or (images_list[0].get("url") if images_list and isinstance(images_list[0], dict) else None),
         "availability": prop.availability,
         "is_demo": bool(prop.is_demo),
     }
@@ -599,7 +662,9 @@ def get_public_record(db: Session, property_id: int) -> Optional["Property"]:
         .filter(
             Property.id == int(property_id),
             Property.is_approved.is_(True),
+            Property.is_published.is_(True),
             Property.availability == "available",
+            Property.is_demo.is_(False),
         )
         .first()
     )
@@ -615,7 +680,9 @@ def get_public_records(db: Session, property_ids: Sequence[int]) -> List["Proper
         .filter(
             Property.id.in_(ids),
             Property.is_approved.is_(True),
+            Property.is_published.is_(True),
             Property.availability == "available",
+            Property.is_demo.is_(False),
         )
         .all()
     )

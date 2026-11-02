@@ -1,5 +1,5 @@
 import React from 'react'
-import { Routes, Route, NavLink, Link, useLocation, Navigate } from 'react-router-dom'
+import { Routes, Route, NavLink, Link, useLocation, Navigate, Outlet } from 'react-router-dom'
 import LandingPage from './pages/LandingPage.jsx'
 import ChatPage from './pages/ChatPage.jsx'
 import ConversationHistory from './pages/ConversationHistory.jsx'
@@ -18,8 +18,25 @@ import AgentLeads from './agent/AgentLeads.jsx'
 import AgentNewLead from './agent/AgentNewLead.jsx'
 import AgentLeadDetail from './agent/AgentLeadDetail.jsx'
 import AgentConversations from './agent/AgentConversations.jsx'
+import AgentProperties from './agent/AgentProperties.jsx'
+import AgentAppointments from './agent/AgentAppointments.jsx'
+import AgentDeals from './agent/AgentDeals.jsx'
+import AgentManagement from './agent/AgentManagement.jsx'
+import AdminWorkforceOversight from './agent/AdminWorkforceOversight.jsx'
+import AdminUserRoles from './agent/AdminUserRoles.jsx'
+import AdminAuditLogs from './agent/AdminAuditLogs.jsx'
 import { trackPath } from './nav.js'
 import api from './api.js'
+import CustomerShell from './customer/CustomerShell.jsx'
+import CustomerDashboard from './customer/CustomerDashboard.jsx'
+import CustomerAppointments from './customer/CustomerAppointments.jsx'
+import CustomerSaved from './customer/CustomerSaved.jsx'
+import CustomerMessages from './customer/CustomerMessages.jsx'
+import CustomerNotifications from './customer/CustomerNotifications.jsx'
+import CustomerProfile from './customer/CustomerProfile.jsx'
+import HrDashboard from './hr/HrDashboard.jsx'
+import HrShell from './hr/HrShell.jsx'
+import './customer/portal.css'
 
 function Logo({ light = true }) {
   const [failed, setFailed] = React.useState(false)
@@ -86,10 +103,10 @@ function Header() {
           </NavLink>
           {customer?.authenticated ? (
             <NavLink
-              to="/profile"
+              to="/portal"
               className={({ isActive }) => `nav-auth${isActive ? ' active' : ''}`}
             >
-              Profile
+              Client Portal
             </NavLink>
           ) : (
             <NavLink
@@ -121,10 +138,10 @@ function Footer() {
 
         <div className="footer__col">
           <div className="footer__title">Services</div>
-          <Link to="/chat">Buy property in Dubai</Link>
-          <Link to="/chat">Rent property in Dubai</Link>
-          <Link to="/chat">Investment advisory</Link>
-          <Link to="/chat">LykAI concierge</Link>
+          <Link to="/properties?search=for+sale">Buy Property in Dubai</Link>
+          <Link to="/properties?search=for+rent">Rent Property in Dubai</Link>
+          <Link to="/properties?search=off-plan">Off-Plan Investments</Link>
+          <Link to="/chat">LykAI Concierge</Link>
         </div>
 
         <div className="footer__col">
@@ -199,6 +216,7 @@ function AppRoutes() {
   // the public marketing header/footer must never wrap internal screens.
   // The global portal (/login, /register) also keeps its own full-bleed layout.
   const isAgentArea =
+    location.pathname.startsWith('/portal') ||
     location.pathname.startsWith('/agent') ||
     location.pathname.startsWith('/hr') ||
     location.pathname.startsWith('/payroll') ||
@@ -235,6 +253,16 @@ function AppRoutes() {
         <Route path="/property/:id" element={<PropertyDetails />} />
         <Route path="/properties/:id" element={<PropertyDetails />} />
 
+        {/* ---------- Customer Portal (Phase H) ---------- */}
+        <Route path="/portal" element={<CustomerShell />}>
+          <Route index element={<CustomerDashboard />} />
+          <Route path="appointments" element={<CustomerAppointments />} />
+          <Route path="saved" element={<CustomerSaved />} />
+          <Route path="messages" element={<CustomerMessages />} />
+          <Route path="notifications" element={<CustomerNotifications />} />
+          <Route path="profile" element={<CustomerProfile />} />
+        </Route>
+
         {/* ---------- ONE global login portal (all roles) ---------- */}
         {/* /login, /register and the legacy /signin alias all render the single
             GlobalLogin portal. Registration remains a customer-only mode. */}
@@ -258,8 +286,52 @@ function AppRoutes() {
             <Route path="new" element={<AgentNewLead />} />
             <Route path=":id" element={<AgentLeadDetail />} />
           </Route>
+          <Route path="appointments" element={<AgentShell />}>
+            <Route index element={<AgentAppointments />} />
+          </Route>
+          <Route path="deals" element={<AgentShell />}>
+            <Route index element={<AgentDeals />} />
+            <Route path=":id" element={<AgentDeals />} />
+          </Route>
+          <Route path="properties" element={<AgentShell />}>
+            <Route index element={<AgentProperties />} />
+            <Route path=":id" element={<AgentProperties />} />
+          </Route>
           <Route path="conversations" element={<AgentShell />}>
             <Route index element={<AgentConversations />} />
+          </Route>
+          <Route path="management" element={<AgentShell />}>
+            <Route index element={<AgentManagement />} />
+          </Route>
+          <Route path="workforce" element={<AgentShell />}>
+            <Route
+              index
+              element={
+                <ProtectedRoute requireRoles={['admin', 'superadmin']}>
+                  <AdminWorkforceOversight />
+                </ProtectedRoute>
+              }
+            />
+          </Route>
+          <Route path="users" element={<AgentShell />}>
+            <Route
+              index
+              element={
+                <ProtectedRoute requireRoles={['admin', 'superadmin']}>
+                  <AdminUserRoles />
+                </ProtectedRoute>
+              }
+            />
+          </Route>
+          <Route path="audit" element={<AgentShell />}>
+            <Route
+              index
+              element={
+                <ProtectedRoute requireRoles={['admin', 'superadmin']}>
+                  <AdminAuditLogs />
+                </ProtectedRoute>
+              }
+            />
           </Route>
         </Route>
 
@@ -267,13 +339,23 @@ function AppRoutes() {
             Genuine permission scaffolding + an honest "not yet implemented"
             dashboard. No fabricated HR/payroll data is ever shown. */}
         <Route
-          path="/hr/dashboard"
+          path="/hr"
           element={
-            <ProtectedRoute>
-              <ModulePlaceholder path="/hr/dashboard" />
-            </ProtectedRoute>
+            <RequireAgent>
+              <ProtectedRoute
+                requireRoles={['admin', 'superadmin', 'hr', 'hr_manager', 'hr_staff']}
+                requireAnyPermission={['attendance.view', 'hr_reports.view', 'employees.view']}
+              >
+                <Outlet />
+              </ProtectedRoute>
+            </RequireAgent>
           }
-        />
+        >
+          <Route element={<HrShell />}>
+            <Route index element={<HrDashboard />} />
+            <Route path="dashboard" element={<HrDashboard />} />
+          </Route>
+        </Route>
         <Route
           path="/payroll/dashboard"
           element={
@@ -301,8 +383,8 @@ function AppRoutes() {
         <Route
           path="/properties/manage"
           element={
-            <ProtectedRoute>
-              <ModulePlaceholder path="/properties/manage" />
+            <ProtectedRoute requiredPermission="properties.read">
+              <Navigate to="/agent/properties" replace />
             </ProtectedRoute>
           }
         />

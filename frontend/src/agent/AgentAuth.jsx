@@ -57,6 +57,7 @@ export function RequireAgent() {
       /* ignore — session may already be gone */
     }
     setAgent(null)
+    window.dispatchEvent(new Event('lyka:auth'))
     window.location.assign('/agent/login')
   }
 

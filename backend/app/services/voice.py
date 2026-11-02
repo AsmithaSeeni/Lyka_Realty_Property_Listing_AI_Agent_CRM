@@ -33,7 +33,7 @@ def _stt_config():
     if provider == "sarvam" or (sarvam_key and provider == "sarvam"):
         return (
             "sarvam",
-            os.getenv("STT_MODEL", "saaras:v1"),
+            os.getenv("STT_MODEL", "saaras:v3"),
             sarvam_key or stt_key,
         )
     return (
@@ -79,7 +79,7 @@ def _tts_config():
         return (
             "sarvam",
             os.getenv("TTS_MODEL", "bulbul:v4-flash"),
-            os.getenv("TTS_VOICE", "neha_mr_narration"),
+            os.getenv("TTS_VOICE", "aparna_en_edtech"),
             sarvam_key or tts_key,
         )
     if provider in ("edge-tts", "edge", "free", "microsoft"):
@@ -183,8 +183,17 @@ async def synthesize_speech(text: str, voice: Optional[str] = None,
 
     if provider == "sarvam":
         if not api_key:
-            raise RuntimeError("Sarvam TTS API key is not configured (.env SARVAM_API_KEY)")
-        return await _tts_sarvam(api_key, model, voice, speak_text, language)
+            logger.warning("Sarvam TTS API key not configured; falling back to neural voice")
+            return await _tts_edge(voice, speak_text, language)
+        try:
+            return await _tts_sarvam(api_key, model, voice, speak_text, language)
+        except Exception as e:
+            logger.warning("Sarvam TTS unavailable or quota exhausted (%s); seamlessly falling back to neural voice", e)
+            try:
+                return await _tts_edge(voice, speak_text, language)
+            except Exception as edge_err:
+                logger.error("Both Sarvam and fallback TTS failed: %s; %s", e, edge_err)
+                raise RuntimeError(f"Speech synthesis failed: {e}") from e
 
     # For edge-tts or other optional providers
     try:
@@ -200,15 +209,8 @@ async def synthesize_speech(text: str, voice: Optional[str] = None,
         else:
             return await _tts_edge(voice, speak_text, language)
     except Exception as e:
-        logger.warning(
-            "Primary TTS provider '%s' failed: %s. Falling back to free Edge-TTS female voice.",
-            provider, e
-        )
-        try:
-            return await _tts_edge("ta-IN-PallaviNeural", speak_text, language)
-        except Exception as fallback_err:
-            logger.error("Edge-TTS fallback also failed: %s", fallback_err)
-            raise RuntimeError(f"Speech synthesis failed ({e})") from e
+        logger.error("Primary TTS provider '%s' failed: %s", provider, e)
+        raise RuntimeError(f"Speech synthesis failed on provider '{provider}': {e}") from e
 
 
 async def _tts_edge(voice: Optional[str], text: str, language: Optional[str] = None) -> bytes:
@@ -216,9 +218,14 @@ async def _tts_edge(voice: Optional[str], text: str, language: Optional[str] = N
     import edge_tts
 
     selected_voice = voice
-    if not selected_voice or selected_voice.lower() in ("mia", "default", "female", "edge-tts", "none"):
+    if (
+        not selected_voice
+        or not selected_voice.endswith("Neural")
+        or selected_voice.lower() in ("mia", "default", "female", "edge-tts", "none", "neha_mr_narration", "gokul_ta_narration", "aparna_en_edtech")
+    ):
         has_tamil_script = any('\u0B80' <= c <= '\u0BFF' for c in text)
-        selected_voice = "ta-IN-PallaviNeural" if has_tamil_script else "en-IN-NeerjaExpressiveNeural"
+        is_tamil = (language in ("ta", "ta-IN", "ta-Latn", "mixed")) or has_tamil_script
+        selected_voice = "ta-IN-PallaviNeural" if is_tamil else "en-IN-NeerjaExpressiveNeural"
 
     clean_speech = _clean_speech_text(text)
 
@@ -248,20 +255,19 @@ async def _tts_sarvam(api_key: str, model: str, voice: str, text: str, language:
         "Content-Type": "application/json",
     }
 
-    # Target language code: en-IN (Indian English) initially; ta-IN for Tamil
+    # Target language code: en-IN (Indian English); ta-IN for Tamil / Tanglish
     has_tamil_script = any('\u0B80' <= c <= '\u0BFF' for c in clean_speech)
-    is_tamil = (language in ("ta", "ta-IN")) or has_tamil_script
+    is_tamil = (language in ("ta", "ta-IN", "ta-Latn", "mixed")) or has_tamil_script
     target_lang = "ta-IN" if is_tamil else "en-IN"
 
-    # Default speaker: neha_mr_narration (Indian narration persona)
-    # Keep Tamil modular: never send Tamil text to Neha English/Marathi voice without notice.
-    speaker = voice or "neha_mr_narration"
-    if is_tamil and speaker == "neha_mr_narration":
+    # Default speaker: aparna_en_edtech (Sarvam Indian English Persona)
+    # For Tamil text, route to gokul_ta_narration if an English voice is selected.
+    speaker = voice or os.getenv("TTS_VOICE", "aparna_en_edtech")
+    if is_tamil and (not voice or speaker in ("aparna_en_edtech", "neha_mr_narration")):
         speaker = os.getenv("TTS_VOICE_TAMIL", "gokul_ta_narration")
 
     payload = {
         "text": clean_speech,
-        "inputs": [clean_speech],
         "target_language_code": target_lang,
         "speaker": speaker,
         "model": model or "bulbul:v4-flash",
@@ -290,8 +296,9 @@ async def _tts_sarvam(api_key: str, model: str, voice: str, text: str, language:
                     raise RuntimeError("Sarvam TTS returned empty audio response")
                 return resp.content
     except httpx.HTTPStatusError as e:
-        logger.error("Sarvam TTS HTTP %s: %s", e.response.status_code, e.response.text[:200])
-        raise RuntimeError(f"Sarvam TTS failed with status {e.response.status_code}") from e
+        err_msg = e.response.text[:300]
+        logger.error("Sarvam TTS HTTP %s: %s", e.response.status_code, err_msg)
+        raise RuntimeError(f"Sarvam TTS failed with status {e.response.status_code}: {err_msg}") from e
     except httpx.TimeoutException as e:
         logger.error("Sarvam TTS request timed out")
         raise RuntimeError("Sarvam TTS request timed out") from e

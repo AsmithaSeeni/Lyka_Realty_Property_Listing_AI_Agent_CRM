@@ -63,6 +63,7 @@ PERMISSIONS: Dict[str, Permission] = {
         _p("leads.read_assigned", "Read leads assigned to you"),
         _p("leads.read_team", "Read leads assigned to your team"),
         _p("leads.read_all", "Read every lead"),
+        _p("leads.read_unassigned", "Read unassigned leads from the shared pickup pool"),
         _p("leads.create", "Create leads"),
         _p("leads.update", "Edit leads in scope"),
         _p("leads.assign", "Assign leads to any agent"),
@@ -70,11 +71,37 @@ PERMISSIONS: Dict[str, Permission] = {
         _p("conversations.read_authorized", "Read customer conversations in scope"),
         _p("conversations.read_all", "Read every customer conversation"),
         _p("followups.manage_assigned", "Manage follow-ups on leads in scope"),
-        # ---- HR (foundation only — no HR module exists yet) ----
-        _p("hr.employees.read", "Read employee records (HR module not built)"),
-        _p("hr.employees.manage", "Manage employee records (HR module not built)"),
-        _p("hr.attendance.read", "Read attendance (HR module not built)"),
-        _p("hr.attendance.manage", "Manage attendance (HR module not built)"),
+        # ---- Phase F: appointments, viewings, offers & deals ----
+        _p("appointments.read", "Read appointments and viewings in scope"),
+        _p("appointments.manage", "Create, reschedule, cancel and update appointments in scope"),
+        _p("appointments.override_conflict", "Override agent scheduling conflicts with reason"),
+        _p("viewings.manage", "Schedule property viewings and record viewing outcomes"),
+        _p("offers.read", "Read offers and counteroffers in scope"),
+        _p("offers.create", "Create and submit offers in scope"),
+        _p("offers.update", "Record counteroffers, withdrawals and offer updates in scope"),
+        _p("offers.accept", "Mark an offer as accepted or rejected"),
+        _p("deals.read", "Read deals and transaction checklists in scope"),
+        _p("deals.create", "Create deals from qualified leads or accepted offers"),
+        _p("deals.update", "Advance deal pipeline stages and update deal details in scope"),
+        _p("deals.approve", "Approve reservation/completion milestones and verify commission"),
+        _p("deals.checklist_verify", "Verify compliance and document checklist milestones"),
+        # ---- HR Management Module (Stage 6J) ----
+        _p("employees.view", "View employee directory and profiles"),
+        _p("employees.create", "Create new employee profiles"),
+        _p("employees.update", "Update employee profiles and assignments"),
+        _p("employees.deactivate", "Deactivate employee accounts and revoke login"),
+        _p("attendance.view", "View company-wide daily attendance records"),
+        _p("attendance.manage", "Record daily attendance check-in and check-out"),
+        _p("attendance.correct", "Authorize manual attendance adjustments with reason"),
+        _p("leave.view", "View leave applications and balances"),
+        _p("leave.review", "Approve or reject leave requests"),
+        _p("leave.manage", "Submit, update or cancel personal leave applications"),
+        _p("hr_reports.view", "View HR attendance, headcount and leave metrics"),
+        # Legacy/foundation aliases
+        _p("hr.employees.read", "Read employee records"),
+        _p("hr.employees.manage", "Manage employee records"),
+        _p("hr.attendance.read", "Read attendance"),
+        _p("hr.attendance.manage", "Manage attendance"),
         # ---- Payroll (foundation only — no payroll module exists yet) ----
         _p("payroll.read_own", "Read your own payroll (module not built)"),
         _p("payroll.read_authorized", "Read authorised payroll records (module not built)"),
@@ -144,10 +171,54 @@ _CRM_LEAD_SCOPE = {
     "leads.update",
     "conversations.read_authorized",
     "followups.manage_assigned",
+    "appointments.read",
+    "appointments.manage",
+    "appointments.override_conflict",
+    "viewings.manage",
+    "offers.read",
+    "offers.create",
+    "offers.update",
+    "offers.accept",
+    "deals.read",
+    "deals.create",
+    "deals.update",
     "reports.read_team",
+    "attendance.manage",
+    "leave.view",
+    "leave.manage",
+}
+
+_HR_SCOPE = {
+    "employees.view",
+    "employees.create",
+    "employees.update",
+    "employees.deactivate",
+    "attendance.view",
+    "attendance.manage",
+    "attendance.correct",
+    "leave.view",
+    "leave.review",
+    "leave.manage",
+    "hr_reports.view",
+    "users.read",
+    "hr.employees.read",
+    "hr.employees.manage",
+    "hr.attendance.read",
+    "hr.attendance.manage",
 }
 
 _ROLE_LIST: List[RoleSpec] = [
+    # ---- Super Administrator (highest privilege) ----
+    _role(
+        "superadmin",
+        "Super Administrator",
+        "Full system administration, multi-branch control, user/role management, security and all CRM records.",
+        "/agent/dashboard",
+        "crm",
+        5,
+        sorted(ALL_PERMISSION_KEYS - {"chat.use", "conversations.read_own",
+                                      "saved.manage", "profile.update_own"}),
+    ),
     # ---- System Administrator (highest privilege) ----
     _role(
         "admin",
@@ -169,15 +240,16 @@ _ROLE_LIST: List[RoleSpec] = [
         20,
         sorted(
             _CRM_LEAD_SCOPE
-            | {"leads.read_all", "leads.assign", "conversations.read_all",
-               "reports.read_all", "users.read"}
+            | {"leads.read_unassigned", "leads.read_team", "leads.assign",
+               "deals.approve", "deals.checklist_verify",
+               "reports.read_team", "users.read"}
         ),
     ),
     # ---- Real Estate Agent (the existing "agent" role) ----
     _role(
         "agent",
         "Real Estate Agent",
-        "Works assigned leads and the shared pickup pool.",
+        "Works assigned leads only (strict scoping enforced; unassigned pool is admin/dispatch-managed).",
         "/agent/dashboard",
         "crm",
         30,
@@ -225,27 +297,33 @@ _ROLE_LIST: List[RoleSpec] = [
         70,
         sorted({"reports.read_all", "payroll.read_authorized"}),
     ),
-    # ---- HR Manager ----
+    # ---- HR Role (Stage 6J) ----
+    _role(
+        "hr",
+        "HR Manager",
+        "Manages employee master records, daily attendance, leave approvals, and HR metrics.",
+        "/hr",
+        "hr",
+        25,
+        sorted(_HR_SCOPE),
+    ),
     _role(
         "hr_manager",
         "HR Manager",
-        "Manages employee records. HR module is not built yet.",
-        "/hr/dashboard",
-        "pending",
-        80,
-        sorted({"hr.employees.read", "hr.employees.manage",
-                "hr.attendance.read", "hr.attendance.manage",
-                "users.read", "reports.read_team"}),
+        "Manages employee records, attendance, and leave.",
+        "/hr",
+        "hr",
+        25,
+        sorted(_HR_SCOPE),
     ),
-    # ---- HR staff ----
     _role(
         "hr_staff",
         "HR Staff",
-        "Reads employee records. HR module is not built yet.",
-        "/hr/dashboard",
-        "pending",
-        85,
-        sorted({"hr.employees.read", "hr.attendance.read"}),
+        "Reads employee records, attendance, and leave.",
+        "/hr",
+        "hr",
+        35,
+        sorted(_HR_SCOPE - {"employees.deactivate", "attendance.correct"}),
     ),
     # ---- Payroll Officer ----
     _role(
@@ -281,9 +359,18 @@ _CUSTOMER_SPEC = RoleSpec(
 ROLE_REGISTRY[CUSTOMER_ROLE] = _CUSTOMER_SPEC
 
 
-# Legacy role strings that must keep resolving (the `agents.role` column has
-# historically only ever held "admin" or "agent").
-_LEGACY_ALIASES = {"admin": "admin", "agent": "agent"}
+# Legacy and canonical role aliases that must resolve to registry keys
+# (the `agents.role` column stores "admin" or "agent"; `sales_agent` maps
+# cleanly to `"agent"` so callers and admin APIs can use either name).
+_LEGACY_ALIASES = {
+    "superadmin": "superadmin",
+    "admin": "admin",
+    "agent": "agent",
+    "sales_agent": "agent",
+    "hr": "hr",
+    "hr_manager": "hr",
+    "hr_staff": "hr",
+}
 
 
 def normalize_role(raw: Optional[str]) -> Optional[str]:

@@ -37,7 +37,69 @@ FOLLOWUP_TYPES = ("call", "email", "whatsapp", "viewing", "general")
 
 # Filter names accepted by the API (validated, never interpolated).
 FOLLOWUP_FILTERS = ("all", "pending", "overdue", "due_today", "upcoming",
-                    "completed")
+                    "completed", "cancelled")
+
+FOLLOWUP_PRIORITIES = ("high", "medium", "low", "normal")
+
+
+def _encode_fu_notes(
+    notes: str,
+    *,
+    priority: Optional[str] = None,
+    is_cancelled: bool = False,
+    cancel_reason: Optional[str] = None,
+) -> str:
+    """Encode optional priority / cancellation metadata into `notes` only when
+    non-default, keeping plain notes verbatim when neither is set."""
+    clean = str(notes or "").strip()
+    tags = []
+    if priority and priority in ("high", "medium", "low"):
+        tags.append(f"[PRIORITY:{priority}]")
+    if is_cancelled:
+        reason_clean = str(cancel_reason or "").strip().replace("]", "")
+        if reason_clean:
+            tags.append(f"[CANCELLED:{reason_clean}]")
+        else:
+            tags.append("[CANCELLED]")
+    if not tags:
+        return clean
+    prefix = " ".join(tags)
+    return f"{prefix} {clean}".strip()
+
+
+def _decode_fu_notes(raw: Optional[str]) -> dict:
+    """Extract clean notes, priority, and cancellation state from `FollowUp.notes`."""
+    text = str(raw or "").strip()
+    priority = "normal"
+    is_cancelled = False
+    cancel_reason = None
+
+    while text.startswith("["):
+        end = text.find("]")
+        if end == -1:
+            break
+        token = text[1:end].strip()
+        if token.startswith("PRIORITY:"):
+            p = token.split(":", 1)[1].strip().lower()
+            if p in FOLLOWUP_PRIORITIES:
+                priority = p
+            text = text[end + 1:].strip()
+        elif token == "CANCELLED":
+            is_cancelled = True
+            text = text[end + 1:].strip()
+        elif token.startswith("CANCELLED:"):
+            is_cancelled = True
+            cancel_reason = token.split(":", 1)[1].strip() or None
+            text = text[end + 1:].strip()
+        else:
+            break
+
+    return {
+        "notes": text,
+        "priority": priority,
+        "is_cancelled": is_cancelled,
+        "cancel_reason": cancel_reason,
+    }
 
 
 def utcnow() -> datetime:
@@ -100,6 +162,11 @@ def filter_followups(query, filt: str, now: Optional[datetime] = None):
         return query.filter(FollowUp.is_completed.is_(False))
     if filt == "completed":
         return query.filter(FollowUp.is_completed.is_(True))
+    if filt == "cancelled":
+        return query.filter(
+            FollowUp.is_completed.is_(True),
+            FollowUp.notes.like("%[CANCELLED%"),
+        )
     pending = query.filter(FollowUp.is_completed.is_(False))
     if filt == "overdue":
         return pending.filter(FollowUp.due_at < today)
@@ -121,26 +188,48 @@ def create_followup(
     due_at,
     notes: str = "",
     assigned_agent_id: Optional[int] = None,
+    priority: Optional[str] = None,
 ) -> FollowUp:
     """Validate and insert a follow-up for an already-validated lead.
 
-    Raises ValueError on invalid type/date/agent — nothing is written.
+    Idempotent on identical pending (lead_id, type, due_at, notes) rows so
+    repeated retries of the same follow-up request do not create duplicates.
+    Raises ValueError on invalid type/date/agent/priority — nothing is written.
     """
     if fu_type not in FOLLOWUP_TYPES:
         raise ValueError(
             f"Unknown follow-up type {fu_type!r} "
             f"(expected one of {', '.join(FOLLOWUP_TYPES)})")
+    if priority is not None and priority not in FOLLOWUP_PRIORITIES:
+        raise ValueError(
+            f"Unknown follow-up priority {priority!r} "
+            f"(expected one of {', '.join(FOLLOWUP_PRIORITIES)})")
     due = parse_due_at(due_at)                      # ValueError on junk
     agent_id = assigned_agent_id
     if agent_id is not None:
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
         if agent is None or not agent.is_active:
             raise ValueError("Unknown agent")
+    encoded_notes = _encode_fu_notes(notes, priority=priority)
+    existing = (
+        db.query(FollowUp)
+        .filter(
+            FollowUp.lead_id == lead.id,
+            FollowUp.type == fu_type,
+            FollowUp.due_at == due,
+            FollowUp.notes == encoded_notes,
+            FollowUp.is_completed.is_(False),
+        )
+        .first()
+    )
+    if existing is not None:
+        return existing
+
     fu = FollowUp(
         lead_id=lead.id,
         assigned_agent_id=agent_id,
         type=fu_type,
-        notes=str(notes or "").strip(),
+        notes=encoded_notes,
         due_at=due,
         is_completed=False,
     )
@@ -151,20 +240,33 @@ def create_followup(
 def update_followup(db: Session, fu: FollowUp, fields: dict) -> FollowUp:
     """Apply a validated partial update. Permitted transitions only.
 
-    - type / notes / due_at: plain validated updates.
+    - type / notes / due_at / priority: plain validated updates.
     - is_completed: toggling to True stamps `completed_at`; toggling to
-      False clears it. No other state machine exists in the schema.
+      False clears it (and clears any cancellation flag).
+    - is_cancelled: marks completed + stores cancellation tag & reason.
     - assigned_agent_id: validated active agent (assignment rules for
       non-self targets are enforced by the caller's RBAC).
     """
+    decoded = _decode_fu_notes(fu.notes)
+    clean_notes = decoded["notes"]
+    priority = decoded["priority"]
+    is_cancelled = decoded["is_cancelled"]
+    cancel_reason = decoded["cancel_reason"]
+
     if "type" in fields and fields["type"] is not None:
         if fields["type"] not in FOLLOWUP_TYPES:
             raise ValueError(
                 f"Unknown follow-up type {fields['type']!r} "
                 f"(expected one of {', '.join(FOLLOWUP_TYPES)})")
         fu.type = fields["type"]
+    if "priority" in fields and fields["priority"] is not None:
+        if fields["priority"] not in FOLLOWUP_PRIORITIES:
+            raise ValueError(
+                f"Unknown follow-up priority {fields['priority']!r} "
+                f"(expected one of {', '.join(FOLLOWUP_PRIORITIES)})")
+        priority = fields["priority"]
     if "notes" in fields and fields["notes"] is not None:
-        fu.notes = str(fields["notes"]).strip()
+        clean_notes = str(fields["notes"]).strip()
     if "due_at" in fields and fields["due_at"] is not None:
         fu.due_at = parse_due_at(fields["due_at"])
     if "assigned_agent_id" in fields:
@@ -174,6 +276,21 @@ def update_followup(db: Session, fu: FollowUp, fields: dict) -> FollowUp:
             if agent is None or not agent.is_active:
                 raise ValueError("Unknown agent")
         fu.assigned_agent_id = target
+
+    if "is_cancelled" in fields and fields["is_cancelled"] is not None:
+        want_cancel = bool(fields["is_cancelled"])
+        if want_cancel:
+            is_cancelled = True
+            cancel_reason = fields.get("cancel_reason", cancel_reason)
+            fu.is_completed = True
+            fu.completed_at = fu.completed_at or utcnow()
+        else:
+            is_cancelled = False
+            cancel_reason = None
+            if "is_completed" not in fields:
+                fu.is_completed = False
+                fu.completed_at = None
+
     if "is_completed" in fields and fields["is_completed"] is not None:
         done = bool(fields["is_completed"])
         if done and not fu.is_completed:
@@ -182,8 +299,31 @@ def update_followup(db: Session, fu: FollowUp, fields: dict) -> FollowUp:
         elif not done and fu.is_completed:
             fu.is_completed = False
             fu.completed_at = None
+            is_cancelled = False
+            cancel_reason = None
+
+    fu.notes = _encode_fu_notes(
+        clean_notes,
+        priority=priority,
+        is_cancelled=is_cancelled,
+        cancel_reason=cancel_reason,
+    )
     fu.updated_at = utcnow()
     return fu
+
+
+def cancel_followup(
+    db: Session,
+    fu: FollowUp,
+    *,
+    reason: Optional[str] = None,
+) -> FollowUp:
+    """Explicitly cancel a follow-up with an optional reason."""
+    return update_followup(
+        db,
+        fu,
+        {"is_cancelled": True, "cancel_reason": reason},
+    )
 
 
 # -------------------------------------------------------------- serialisers
@@ -198,14 +338,26 @@ def follow_up_summary(fu: Optional[FollowUp]) -> Optional[dict]:
     if fu is None:
         return None
     agent = fu.assigned_agent
+    decoded = _decode_fu_notes(fu.notes)
+    bucket = follow_up_bucket(fu.due_at) if not fu.is_completed else None
+    is_cancelled = decoded["is_cancelled"]
+    status = (
+        "cancelled"
+        if is_cancelled
+        else ("completed" if fu.is_completed else bucket)
+    )
     return {
         "id": fu.id,
         "lead_id": fu.lead_id,
         "type": fu.type,
-        "notes": fu.notes or "",
+        "notes": decoded["notes"],
+        "priority": decoded["priority"],
         "due_at": _iso_z(fu.due_at),
-        "bucket": follow_up_bucket(fu.due_at) if not fu.is_completed else None,
+        "bucket": bucket,
+        "status": status,
         "is_completed": bool(fu.is_completed),
+        "is_cancelled": is_cancelled,
+        "cancel_reason": decoded["cancel_reason"],
         "completed_at": _iso_z(fu.completed_at),
         "assigned_agent_id": fu.assigned_agent_id,
         "assigned_agent_name": agent.full_name if agent else None,

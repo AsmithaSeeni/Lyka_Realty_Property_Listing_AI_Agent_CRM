@@ -20,27 +20,30 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.database import Property
+from app.database import Property, PropertyRecommendation, SavedProperty
 from app.services.property_search import (
     VALID_AVAILABILITY,
     VALID_PURPOSES,
     parse_price,
 )
 
+SAVED_RECORD_ID_BASE = 1_000_000
+
 # Fields a caller may set on create.
 _CREATE_FIELDS = (
     "title", "description", "purpose", "availability", "price", "currency",
     "property_type", "location", "bedrooms", "bathrooms", "area", "area_unit",
-    "amenities", "highlights", "external_ref", "source",
+    "amenities", "highlights", "external_ref", "source", "images", "primary_image",
+    "source_id", "import_batch_id", "is_published", "verification_status",
 )
 
-# Fields allowed in an update. `is_approved` is deliberately handled apart
-# (allow_approval_change gate). `is_demo` may only be set at creation so a
-# record's fictional/real provenance can never be rewritten afterwards.
+# Fields allowed in an update. `is_approved`, `is_published`, and `verification_status`
+# are deliberately handled apart (allow_approval_change gate). `is_demo` may only be set at creation.
 _UPDATE_FIELDS = (
     "title", "description", "purpose", "availability", "price", "currency",
     "property_type", "location", "bedrooms", "bathrooms", "area", "area_unit",
-    "amenities", "highlights",
+    "amenities", "highlights", "external_ref", "images", "primary_image",
+    "rejection_reason",
 )
 
 
@@ -183,6 +186,20 @@ def create_property(db: Session, data: Dict[str, Any]) -> Property:
         area_unit=str(data.get("area_unit") or "sqft").strip() or "sqft",
         amenities=_normalize_amenities(data.get("amenities")),
         highlights=data.get("highlights"),
+        images=str(data.get("images") or "[]"),
+        primary_image=str(data.get("primary_image")).strip() if data.get("primary_image") else None,
+        source_id=str(data.get("source_id")).strip() if data.get("source_id") else None,
+        import_batch_id=str(data.get("import_batch_id")).strip() if data.get("import_batch_id") else None,
+        verification_status=(
+            str(data.get("verification_status") or "unverified").strip().lower()
+            if "verification_status" in data
+            else ("verified" if data.get("is_approved") else "unverified")
+        ),
+        is_published=(
+            bool(data.get("is_published"))
+            if "is_published" in data
+            else bool(data.get("is_approved", False))
+        ),
         is_approved=bool(data.get("is_approved", False)),
         is_demo=bool(data.get("is_demo", False)),
         source=str(data.get("source") or "manual").strip() or "manual",
@@ -217,13 +234,13 @@ def update_property(
         raise ValueError("changes must be an object")
     prop = get_property(db, property_id)
 
-    unknown = set(changes) - set(_UPDATE_FIELDS) - {"is_approved"}
+    unknown = set(changes) - set(_UPDATE_FIELDS) - {"is_approved", "is_published", "verification_status"}
     if unknown:
         raise ValueError(f"Unknown property field(s): {sorted(unknown)}")
 
-    if "is_approved" in changes and not allow_approval_change:
+    if ("is_approved" in changes or "is_published" in changes or "verification_status" in changes) and not allow_approval_change:
         raise ValueError(
-            "Changing approval status is not permitted for this caller"
+            "Changing approval or publication status is not permitted for this caller"
         )
 
     for field in _UPDATE_FIELDS:
@@ -242,14 +259,53 @@ def update_property(
             value = _validate_int(value, field)
             if field == "bathrooms" and (value is None or value < 1):
                 raise ValueError("bathrooms must be >= 1")
-        elif field in ("title", "location", "property_type") and not str(value or "").strip():
-            raise ValueError(f"{field} cannot be empty")
+            if field == "bedrooms" and value is None:
+                value = 0
+        elif field == "area":
+            if value is not None:
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                    raise ValueError(f"area must be a non-negative number, got {value!r}")
+                value = float(value)
+        elif field in ("title", "location", "property_type"):
+            text_val = str(value or "").strip()
+            if not text_val:
+                raise ValueError(f"{field} cannot be empty")
+            value = text_val
+        elif field == "description":
+            value = str(value or "").strip()
+        elif field == "area_unit" and value is not None:
+            value = str(value).strip() or "sqft"
         elif field == "currency" and value is not None:
             value = str(value).strip().upper() or "AED"
+        elif field == "external_ref":
+            ext_val = str(value).strip() if value is not None else None
+            ext_val = ext_val or None
+            if ext_val and ext_val != prop.external_ref:
+                existing = (
+                    db.query(Property)
+                    .filter(
+                        Property.external_ref == ext_val,
+                        Property.id != prop.id,
+                    )
+                    .first()
+                )
+                if existing is not None:
+                    raise ValueError(
+                        f"external_ref {ext_val!r} already exists (id={existing.id})"
+                    )
+            value = ext_val
         setattr(prop, field, value)
 
     if "is_approved" in changes:
         prop.is_approved = bool(changes["is_approved"])
+        if prop.is_approved and "is_published" not in changes and not getattr(prop, "is_published", False):
+            prop.is_published = True
+            if not getattr(prop, "verification_status", None) or prop.verification_status == "unverified":
+                prop.verification_status = "verified" 
+    if "is_published" in changes:
+        prop.is_published = bool(changes["is_published"])
+    if "verification_status" in changes:
+        prop.verification_status = str(changes["verification_status"]).strip().lower()
 
     prop.updated_at = datetime.utcnow()
     db.commit()
@@ -257,8 +313,82 @@ def update_property(
     return prop
 
 
-def delete_property(db: Session, property_id: int) -> None:
+def property_reference_counts(db: Session, property_id: int) -> Dict[str, int]:
+    """Return counts of CRM records referencing this property row."""
+    from app.database import Appointment, Deal, Offer
+
+    pid = int(property_id)
+    rec_count = (
+        db.query(func.count(PropertyRecommendation.id))
+        .filter(PropertyRecommendation.property_record_id == pid)
+        .scalar()
+        or 0
+    )
+    saved_count = (
+        db.query(func.count(SavedProperty.id))
+        .filter(SavedProperty.property_id == (SAVED_RECORD_ID_BASE + pid))
+        .scalar()
+        or 0
+    )
+    appt_count = (
+        db.query(func.count(Appointment.id))
+        .filter(Appointment.property_id == pid)
+        .scalar()
+        or 0
+    )
+    offer_count = (
+        db.query(func.count(Offer.id))
+        .filter(Offer.property_id == pid)
+        .scalar()
+        or 0
+    )
+    deal_count = (
+        db.query(func.count(Deal.id))
+        .filter(Deal.property_id == pid)
+        .scalar()
+        or 0
+    )
+    return {
+        "recommendations": int(rec_count),
+        "saved": int(saved_count),
+        "appointments": int(appt_count),
+        "offers": int(offer_count),
+        "deals": int(deal_count),
+        "total": int(rec_count) + int(saved_count) + int(appt_count) + int(offer_count) + int(deal_count),
+    }
+
+
+def archive_property(db: Session, property_id: int) -> Property:
+    """Safely archive a property (`availability='off_market'`, `is_approved=False`).
+
+    Preserves historical lead recommendations and saved-property references while
+    immediately removing the property from public customer browsing and active
+    lead matching.
+    """
     prop = get_property(db, property_id)
+    prop.availability = "off_market"
+    prop.is_approved = False
+    prop.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(prop)
+    return prop
+
+
+def delete_property(db: Session, property_id: int) -> None:
+    """Delete an unreferenced property record.
+
+    If the property is referenced by lead recommendations or customer bookmarks,
+    hard deletion is refused with a ValueError instructing the caller to archive
+    the property instead so historical CRM integrity is never broken.
+    """
+    prop = get_property(db, property_id)
+    refs = property_reference_counts(db, prop.id)
+    if refs["total"] > 0:
+        raise ValueError(
+            f"Property {prop.id} is referenced by {refs['recommendations']} lead "
+            f"recommendation(s) and {refs['saved']} saved bookmark(s); archive it "
+            f"instead of deleting to preserve historical records."
+        )
     db.delete(prop)
     db.commit()
 
@@ -269,9 +399,17 @@ def list_properties(
     purpose: Optional[str] = None,
     availability: Optional[object] = None,
     approved: Optional[bool] = None,
+    is_published: Optional[bool] = None,
+    verification_status: Optional[str] = None,
     is_demo: Optional[bool] = None,
+    source: Optional[str] = None,
+    exclude_sources: Optional[Sequence[str]] = None,
     location: Optional[str] = None,
     property_type: Optional[str] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    min_bedrooms: Optional[int] = None,
+    max_bedrooms: Optional[int] = None,
     q: Optional[str] = None,
     sort: str = "newest",
     limit: int = 20,
@@ -279,7 +417,7 @@ def list_properties(
 ) -> Tuple[List[Property], int]:
     """Filtered, paginated listing. Returns ``(rows, total)``.
 
-    Unlike ``search_property_records`` this is an ADMIN view: no eligibility
+    Unlike ``search_property_records`` this is an ADMIN/STAFF view: no eligibility
     filter is applied unless the caller asks for one (each parameter is
     optional; ``None`` means "no filter").
     """
@@ -299,8 +437,20 @@ def list_properties(
             query = query.filter(Property.availability.in_(values))
     if approved is not None:
         query = query.filter(Property.is_approved.is_(bool(approved)))
+    if is_published is not None:
+        query = query.filter(Property.is_published.is_(bool(is_published)))
+    if verification_status is not None and str(verification_status).strip():
+        query = query.filter(func.lower(Property.verification_status) == str(verification_status).strip().lower())
     if is_demo is not None:
         query = query.filter(Property.is_demo.is_(bool(is_demo)))
+    if source is not None and str(source).strip():
+        query = query.filter(
+            func.lower(Property.source) == str(source).strip().lower()
+        )
+    if exclude_sources:
+        excluded = [str(s).strip().lower() for s in exclude_sources if str(s).strip()]
+        if excluded:
+            query = query.filter(~func.lower(Property.source).in_(excluded))
     if location:
         query = query.filter(
             func.lower(Property.location).like(f"%{str(location).strip().lower()}%")
@@ -310,12 +460,25 @@ def list_properties(
             func.lower(Property.property_type)
             == str(property_type).strip().lower()
         )
+    if min_price is not None:
+        query = query.filter(Property.price >= _validate_price(min_price))
+    if max_price is not None:
+        query = query.filter(Property.price <= _validate_price(max_price))
+    if min_bedrooms is not None:
+        query = query.filter(
+            Property.bedrooms >= (_validate_int(min_bedrooms, "min_bedrooms") or 0)
+        )
+    if max_bedrooms is not None:
+        query = query.filter(
+            Property.bedrooms <= (_validate_int(max_bedrooms, "max_bedrooms") or 0)
+        )
     if q:
         token = f"%{str(q).strip().lower()}%"
         query = query.filter(
             func.lower(Property.title).like(token)
             | func.lower(Property.location).like(token)
-            | func.lower(Property.description).like(token)
+            | func.lower(func.coalesce(Property.description, "")).like(token)
+            | func.lower(func.coalesce(Property.external_ref, "")).like(token)
         )
 
     total = query.count()
@@ -324,11 +487,135 @@ def list_properties(
         "oldest": Property.created_at.asc(),
         "price_asc": Property.price.asc(),
         "price_desc": Property.price.desc(),
+        "updated_desc": Property.updated_at.desc(),
     }.get(sort)
     if order is None:
         raise ValueError(
             f"Unknown sort {sort!r} "
-            "(expected newest|oldest|price_asc|price_desc)"
+            "(expected newest|oldest|price_asc|price_desc|updated_desc)"
         )
     rows = query.order_by(order, Property.id.asc()).offset(offset).limit(limit).all()
     return rows, total
+
+
+def inventory_summary(
+    db: Session,
+    *,
+    exclude_sources: Optional[Sequence[str]] = None,
+    include_demo: bool = False,
+) -> Dict[str, int]:
+    """Return real database counts across key inventory lifecycle states.
+
+    Raw, uncurated dataset rows (`source='uae_dataset'`, `is_approved=False`,
+    `availability='off_market'`) are tracked separately in `dataset_*` counters
+    so they never inflate CRM `total` or `archived` KPIs unexpectedly, while any
+    dataset row promoted/curated into CRM workflow (`is_approved=True` or
+    `availability != 'off_market'`) is included in the active CRM KPIs.
+    """
+    dataset_base = db.query(Property).filter(
+        func.lower(Property.source) == "uae_dataset"
+    )
+    dataset_total = dataset_base.count()
+    dataset_approved = dataset_base.filter(Property.is_approved.is_(True)).count()
+    dataset_unapproved = dataset_base.filter(Property.is_approved.is_(False)).count()
+
+    base = db.query(Property)
+    if exclude_sources:
+        excluded = [str(s).strip().lower() for s in exclude_sources if str(s).strip()]
+        if excluded:
+            base = base.filter(~func.lower(Property.source).in_(excluded))
+    else:
+        # Exclude raw uncurated uae_dataset rows (is_approved=False & off_market)
+        # from active CRM KPIs so importing 25,082 market rows does not report
+        # 25,082 "Archived" CRM listings.
+        base = base.filter(
+            (func.lower(Property.source) != "uae_dataset")
+            | Property.is_approved.is_(True)
+            | (Property.availability != "off_market")
+        )
+
+    if not include_demo:
+        base = base.filter(Property.is_demo.is_(False))
+    total = base.count()
+    published = (
+        base.filter(
+            Property.is_approved.is_(True),
+            Property.is_published.is_(True),
+            Property.availability == "available",
+        ).count()
+    )
+    pending_approval = (
+        base.filter(
+            (Property.verification_status == "pending_review")
+            | (Property.is_approved.is_(False) & (Property.availability != "off_market"))
+        ).count()
+    )
+    unverified = base.filter(Property.verification_status == "unverified").count()
+    rejected = base.filter(Property.verification_status == "rejected").count()
+    reserved_or_closed = (
+        base.filter(
+            Property.availability.in_(("reserved", "sold", "rented"))
+        ).count()
+    )
+    archived = base.filter(Property.availability == "off_market").count()
+    return {
+        "total": int(total),
+        "published": int(published),
+        "pending_approval": int(pending_approval),
+        "unverified": int(unverified),
+        "rejected": int(rejected),
+        "reserved_or_closed": int(reserved_or_closed),
+        "archived": int(archived),
+        "dataset_total": int(dataset_total),
+        "dataset_approved": int(dataset_approved),
+        "dataset_unapproved": int(dataset_unapproved),
+    }
+
+
+def staff_property_dict(
+    prop: Property,
+    *,
+    reference_counts: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """Serialize a Property row for authorized staff/admin endpoints."""
+    try:
+        amenities_list = json.loads(prop.amenities or "[]")
+        if not isinstance(amenities_list, list):
+            amenities_list = []
+    except Exception:
+        amenities_list = []
+    payload: Dict[str, Any] = {
+        "id": prop.id,
+        "external_ref": prop.external_ref,
+        "title": prop.title,
+        "description": prop.description or "",
+        "purpose": prop.purpose,
+        "availability": prop.availability,
+        "price": prop.price,
+        "currency": prop.currency or "AED",
+        "property_type": prop.property_type,
+        "location": prop.location,
+        "bedrooms": prop.bedrooms,
+        "bathrooms": prop.bathrooms,
+        "area": prop.area,
+        "area_unit": prop.area_unit or "sqft",
+        "amenities": amenities_list,
+        "highlights": prop.highlights,
+        "is_approved": bool(prop.is_approved),
+        "is_published": bool(getattr(prop, "is_published", False)),
+        "verification_status": getattr(prop, "verification_status", "unverified") or "unverified",
+        "rejection_reason": getattr(prop, "rejection_reason", None),
+        "published_at": prop.published_at.isoformat() if getattr(prop, "published_at", None) else None,
+        "images": json.loads(getattr(prop, "images", "[]") or "[]") if isinstance(getattr(prop, "images", None), str) else (getattr(prop, "images", []) or []),
+        "primary_image": getattr(prop, "primary_image", None),
+        "source_id": getattr(prop, "source_id", None),
+        "import_batch_id": getattr(prop, "import_batch_id", None),
+        "archived_at": prop.archived_at.isoformat() if getattr(prop, "archived_at", None) else None,
+        "is_demo": bool(prop.is_demo),
+        "source": prop.source or "manual",
+        "created_at": prop.created_at.isoformat() if prop.created_at else None,
+        "updated_at": prop.updated_at.isoformat() if prop.updated_at else None,
+    }
+    if reference_counts is not None:
+        payload["reference_counts"] = reference_counts
+    return payload

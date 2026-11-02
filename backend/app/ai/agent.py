@@ -7,6 +7,7 @@ from datetime import datetime
 
 from app.services.property_search import search_properties, load_properties, parse_price
 from app.ai.nvidia_client import NVIDIAClient
+from app.ai import preference_extraction
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,13 @@ class ConversationState:
             "phone": None,
             "email": None,
         }
+        # Contact capture & handoff state
+        self.contact_declined: bool = False
+        self.consent_recorded: Optional[str] = None
+        self.contact_preference: Optional[str] = None  # "whatsapp", "call", "email"
+        self.callback_request: Optional[Dict[str, Any]] = None
+        self.viewing_interest: Optional[Dict[str, Any]] = None
+        self.handoff_requested: bool = False
         # Conversation history
         self.messages: List[Dict[str, Any]] = []
         # Track what questions have been asked
@@ -77,6 +85,12 @@ class ConversationState:
             "conversation_id": self.conversation_id,
             "requirements": self.requirements,
             "contact": self.contact,
+            "contact_declined": self.contact_declined,
+            "consent_recorded": self.consent_recorded,
+            "contact_preference": self.contact_preference,
+            "callback_request": self.callback_request,
+            "viewing_interest": self.viewing_interest,
+            "handoff_requested": self.handoff_requested,
             "messages": self.messages,
             "detected_language": self.detected_language,
             "language_style": self.language_style,
@@ -92,6 +106,12 @@ class ConversationState:
         state = cls(conversation_id=data.get("conversation_id"))
         state.requirements = data.get("requirements", state.requirements)
         state.contact = data.get("contact", state.contact)
+        state.contact_declined = bool(data.get("contact_declined", False))
+        state.consent_recorded = data.get("consent_recorded")
+        state.contact_preference = data.get("contact_preference")
+        state.callback_request = data.get("callback_request")
+        state.viewing_interest = data.get("viewing_interest")
+        state.handoff_requested = bool(data.get("handoff_requested", False))
         state.messages = data.get("messages", [])
         state.detected_language = data.get("detected_language", "en")
         state.language_style = data.get("language_style", "en")
@@ -103,6 +123,79 @@ class ConversationState:
         state.recommended_properties = data.get("recommended_properties", [])
         state.asked_questions = set(data.get("asked_questions", []))
         return state
+
+    def memory_dict(self) -> Dict[str, Any]:
+        """Structured memory for DB persistence (no transcript/recommendations —
+        those already live in their own tables)."""
+
+        def _clean(value: Any) -> Any:
+            # Only JSON-safe scalars/containers may enter the memory blob.
+            if value is None or isinstance(value, (str, int, float, bool)):
+                return value
+            if isinstance(value, list):
+                return [v for v in value if isinstance(v, (str, int, float, bool))]
+            return None
+
+        return {
+            "version": 2,
+            "requirements": {
+                k: _clean(v) for k, v in self.requirements.items()
+            },
+            "contact": {
+                k: _clean(v) for k, v in self.contact.items()
+            },
+            "contact_declined": self.contact_declined,
+            "consent_recorded": self.consent_recorded,
+            "contact_preference": self.contact_preference,
+            "callback_request": self.callback_request,
+            "viewing_interest": self.viewing_interest,
+            "handoff_requested": self.handoff_requested,
+            "detected_language": self.detected_language,
+            "language_style": self.language_style,
+            "reply_language": self.reply_language,
+            "language_request": self.language_request,
+            "asked_questions": sorted(self.asked_questions),
+        }
+
+    def apply_memory(self, data: Dict[str, Any]) -> None:
+        """Merge a persisted memory blob into this state (field-by-field; the
+        stored values win — they are the exact slots the customer confirmed,
+        which the lossy regex replay would otherwise re-derive incorrectly)."""
+        if not isinstance(data, dict):
+            return
+        req = data.get("requirements")
+        if isinstance(req, dict):
+            for key, value in req.items():
+                if isinstance(key, str) and key:
+                    self.requirements[key] = value
+        contact = data.get("contact")
+        if isinstance(contact, dict):
+            for key in ("name", "phone", "email"):
+                value = contact.get(key)
+                if isinstance(value, str) and value.strip():
+                    self.contact[key] = value.strip()
+        if "contact_declined" in data:
+            self.contact_declined = bool(data["contact_declined"])
+        if "consent_recorded" in data:
+            self.consent_recorded = data.get("consent_recorded")
+        if "contact_preference" in data:
+            self.contact_preference = data.get("contact_preference")
+        if isinstance(data.get("callback_request"), dict):
+            self.callback_request = data.get("callback_request")
+        if isinstance(data.get("viewing_interest"), dict):
+            self.viewing_interest = data.get("viewing_interest")
+        if "handoff_requested" in data:
+            self.handoff_requested = bool(data["handoff_requested"])
+        for field in ("detected_language", "language_style", "reply_language"):
+            value = data.get(field)
+            if isinstance(value, str) and value:
+                setattr(self, field, value)
+        request = data.get("language_request")
+        if isinstance(request, str):
+            self.language_request = request
+        asked = data.get("asked_questions")
+        if isinstance(asked, list):
+            self.asked_questions = {str(q) for q in asked if q}
 
 
 class AIRealEstateAgent:
@@ -145,8 +238,13 @@ class AIRealEstateAgent:
       open every reply the same way.
     - Only after responding do you ask at most ONE useful follow-up question.
     - Never ask for anything the CONTEXT block already shows you (budget,
-      location, bedrooms, buy/rent, type...). Ask again ONLY if the customer's
-      new message genuinely contradicts what you know or changes their preferences.
+      location, bedrooms, buy/rent, type...). The CONTEXT block AND the full
+      conversation history are BOTH ground truth: never re-ask a fact either
+      one already contains — no matter how the customer phrased it (English,
+      Tanglish, "1 BHK" or "one bedroom"). Ask again ONLY if the customer's
+      new message genuinely contradicts what you know or changes their
+      preferences. Unknown facts stay unknown: never invent that the customer
+      said something they did not.
     - Skip qualification steps that are already answered - as soon as you have
       enough to search, search.
     - If the customer is unsure, guide them briefly (budget + travel + purpose)
@@ -201,8 +299,9 @@ class AIRealEstateAgent:
       "I can have our Lyka Realty specialist coordinate a viewing and full details - contact number share panna viruppama?"
       Ask for contact details only when relevant, and do not repeatedly request the same details.
     - Never say a viewing is booked (the team coordinates that with the owner/agent) - say our specialist will reach out.
-    - When they provide their name, phone number, or email, confirm that you have saved their details into the system:
-      "Thank you! Unga details save panniten, our team will get in touch shortly." / "Romba nandri! Unga details note pannikittaen, seekiramae contact pannuvom." / "Thank you! I've saved your details, our specialist will be in touch shortly."
+    - When they provide their name, phone number, or email, confirm that you have saved their details into the system ONLY if the CONTEXT block's PERSISTENCE section says that item is saved this turn — e.g. "Thank you! Unga details save panniten, our team will get in touch shortly." / "Romba nandri! Unga details note pannikittaen, seekiramae contact pannuvom." / "Thank you! I've saved your details, our specialist will be in touch shortly."
+      If PERSISTENCE says "not yet", say you have NOTED the details (never claim they were saved, stored, or added to the system).
+      Never claim a lead, follow-up, viewing, or callback was created unless the CONTEXT block explicitly confirms it this turn.
     - Take contact details ONLY when the customer actually offers them - never invent or assume them.
 
     CASUAL TANGLISH ONLY (HUMANIC REAL ESTATE TALK):
@@ -239,6 +338,10 @@ class AIRealEstateAgent:
     def __init__(self, conversation_id: Optional[int] = None):
         self.state = ConversationState(conversation_id)
         self.property_cache: Dict[str, List] = {}  # Cache search results
+        # What the SERVER actually persisted for THIS turn, set by the chat
+        # handler before respond() runs so the model can only claim a save the
+        # backend has already staged (see _context_block PERSISTENCE lines).
+        self.persistence_status: Optional[Dict[str, bool]] = None
     
     # Common Tamil words used in Tanglish (romanized). Shared with tests so a
     # live reply that the detector accepted as Tanglish is always verifiable.
@@ -281,33 +384,39 @@ class AIRealEstateAgent:
     # reply language - "Is Tamil spoken in Dubai?" or a mention of "Tamil
     # Nadu" must not.
     _LANGUAGE_REQUEST_PATTERNS = (
-        (re.compile(
-            r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b"
-            r"[^.!?\n]{0,40}?\b(?:in\s+|la\s+)?(?:tamil|தமிழ்)\b",
-            re.IGNORECASE,
-        ), "ta"),
-        # Tanglish request form: "speak in Tanglish" / "Tanglish la pesunga"
+        # Arabic requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+)?(?:arabic)\b", re.IGNORECASE), "ar"),
+        (re.compile(r"\b(?:بالعربية|تكلم\s+عربي|تحدث\s+بالعربية|رد\s+بالعربي|اكتب\s+بالعربي)\b"), "ar"),
+        # Hindi requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+)?(?:hindi)\b", re.IGNORECASE), "hi"),
+        (re.compile(r"\b(?:हिंदी\s*में\s*(?:बात|बोल|जवाब|लिख)|हिन्दी\s*में)\b"), "hi"),
+        # Hinglish requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+)?hinglish\b", re.IGNORECASE), "hi-Latn"),
+        (re.compile(r"\bhinglish\b", re.IGNORECASE), "hi-Latn"),
+        # Malayalam requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+)?(?:malayalam)\b", re.IGNORECASE), "ml"),
+        (re.compile(r"\b(?:മലയാളത്തിൽ\s*(?:സംസാരിക്കുക|മറുപടി|പറയുക)|മലയാളം)\b"), "ml"),
+        # French requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+)?(?:french|en\s+français)\b", re.IGNORECASE), "fr"),
+        # Spanish requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+)?(?:spanish|en\s+español)\b", re.IGNORECASE), "es"),
+        # German requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+)?(?:german|auf\s+deutsch)\b", re.IGNORECASE), "de"),
+        # Russian requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+)?(?:russian|по-русски)\b", re.IGNORECASE), "ru"),
+        # Telugu requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+)?(?:telugu)\b", re.IGNORECASE), "te"),
+        # Tamil requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+|la\s+)?(?:tamil|தமிழ்)\b", re.IGNORECASE), "ta"),
         (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\btanglish\b", re.IGNORECASE), "ta-Latn"),
         (re.compile(r"\btanglish\s*(?:-la|la|il|le)?\s*(?:pes|soll|chat|talk|speak|pann)", re.IGNORECASE), "ta-Latn"),
         (re.compile(r"\b(?:casual\s+tanglish|tanglish)\b", re.IGNORECASE), "ta-Latn"),
-        # Tamil request forms:
         (re.compile(r"\btamil\s*(?:-la|la|il|le)?\s*(?:pes|soll|chat|talk|speak|pann)", re.IGNORECASE), "ta"),
         (re.compile(r"\bcasual\s+tamil\b", re.IGNORECASE), "ta"),
         (re.compile(r"\bதமிழ\S{0,6}\s*(?:லா|ல|இல்)?\s*(?:பேச|பேசு|சொல்ல|உரையாட)"), "ta"),
-        (re.compile(
-            r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b"
-            r"[^.!?\n]{0,40}?\b(?:in\s+|la\s+)?english\b",
-            re.IGNORECASE,
-        ), "en"),
-        # English asked for in Tamil-first order: "English la explain
-        # pannunga." - marker detection reads that as Tanglish (it contains
-        # "pannunga"), so without this the customer asking for English would
-        # be answered in Tanglish.
-        (re.compile(
-            r"\benglish\s*(?:-la|la)\s*"
-            r"(?:explain|soll|pes|pann|tell|say|write|convert|translate|type)",
-            re.IGNORECASE,
-        ), "en"),
+        # English requests
+        (re.compile(r"\b(?:talk|speak|reply|respond|chat|answer|write|say)\b[^.!?\n]{0,40}?\b(?:in\s+|la\s+)?english\b", re.IGNORECASE), "en"),
+        (re.compile(r"\benglish\s*(?:-la|la)\s*(?:explain|soll|pes|pann|tell|say|write|convert|translate|type)", re.IGNORECASE), "en"),
     )
 
     @classmethod
@@ -322,49 +431,77 @@ class AIRealEstateAgent:
 
     def detect_language_and_style(self, text: str) -> Tuple[str, str]:
         """
-        Detect if the user is speaking English, Tamil, Tanglish, or mixed.
+        Detect incoming language: Arabic, Hindi, Malayalam, Telugu, Russian,
+        French, Spanish, German, Tamil, Tanglish, Hinglish, or English.
         Returns (language_code, style).
-        language_code: "en" for English, "ta" for Tamil, "ta-Latn" for Tanglish
-        style: "en", "ta", or "ta-Latn"
         """
         text_lower = text.lower()
-        
-        # Check for Tamil script characters (Unicode block 0B80-0BFF)
-        has_tamil_script = any('\u0B80' <= c <= '\u0BFF' for c in text)
-        if has_tamil_script:
-            # Pure Tamil script -> "ta"; mixed script+latin -> "mixed"
-            has_latin = any('a' <= c <= 'z' for c in text_lower)
-            if has_latin and re.search(r"\b(the|and|is|for|with|need|want)\b", text_lower):
-                return "mixed", "ta"
-            return "ta", "ta"
-        
-        # Common Tamil words used in Tanglish (romanized)
+
+        # 1-6. Non-Latin Unicode script frequency counting
+        ar_count = sum(1 for c in text if ('\u0600' <= c <= '\u06FF') or ('\u0750' <= c <= '\u077F') or ('\u08A0' <= c <= '\u08FF') or ('\uFB50' <= c <= '\uFDFF') or ('\uFE70' <= c <= '\uFEFF'))
+        hi_count = sum(1 for c in text if '\u0900' <= c <= '\u097F')
+        ta_count = sum(1 for c in text if '\u0B80' <= c <= '\u0BFF')
+        ml_count = sum(1 for c in text if '\u0D00' <= c <= '\u0D7F')
+        te_count = sum(1 for c in text if '\u0C00' <= c <= '\u0C7F')
+        ru_count = sum(1 for c in text if '\u0400' <= c <= '\u04FF')
+
+        max_script = max(ar_count, hi_count, ta_count, ml_count, te_count, ru_count)
+        if max_script > 0:
+            if max_script == ar_count:
+                return "ar", "ar"
+            if max_script == hi_count:
+                return "hi", "hi"
+            if max_script == ml_count:
+                return "ml", "ml"
+            if max_script == te_count:
+                return "te", "te"
+            if max_script == ru_count:
+                return "ru", "ru"
+            if max_script == ta_count:
+                has_latin = any('a' <= c <= 'z' for c in text_lower)
+                if has_latin and re.search(r"\b(the|and|is|for|with|need|want)\b", text_lower):
+                    return "mixed", "ta"
+                return "ta", "ta"
+        # 7. Romanized Script / European & South Asian languages
+        words = set(re.findall(r"[a-z']+", text_lower))
+
+        # Hinglish indicators
+        hinglish_words = {"chahiye", "batao", "bataiye", "accha", "acha", "kya", "hai", "hain", "kitna", "kitne", "mujhe", "humko", "kripya", "dhanyavad", "bhai", "kaisa", "kaunsa", "dekhna"}
+        if len(words & hinglish_words) >= 2 or (len(words & hinglish_words) >= 1 and re.search(r"\b(?:budget-me|lakh|crore|hoga)\b", text_lower)):
+            return "hi-Latn", "hi-Latn"
+
+        # French indicators
+        french_words = {"bonjour", "salut", "cherche", "appartement", "chambre", "combien", "merci", "maison", "prix", "louer", "acheter", "plait"}
+        if len(words & french_words) >= 2:
+            return "fr", "fr"
+
+        # Spanish indicators
+        spanish_words = {"hola", "busco", "departamento", "habitaciones", "cuanto", "gracias", "casa", "precio", "comprar", "alquilar", "favor"}
+        if len(words & spanish_words) >= 2:
+            return "es", "es"
+
+        # German indicators
+        german_words = {"hallo", "guten", "suche", "wohnung", "zimmer", "wieviel", "danke", "bitte", "haus", "kaufen", "mieten"}
+        if len(words & german_words) >= 2:
+            return "de", "de"
+
+        # Tanglish indicators (Tamil in Latin letters)
         tamil_words = self._TAMIL_WORDS
-        
-        # Count Tamil words as whole words
-        words = re.findall(r"[a-z']+", text_lower)
-        tamil_count = sum(1 for w in words if w in tamil_words)
-        
-        # Count Tamil suffix patterns like "marina-ku", "budget-ah", "3-million-kulla"
+        tamil_count = sum(1 for w in re.findall(r"[a-z']+", text_lower) if w in tamil_words)
         suffix_patterns = [
             r"\w+-ku\b", r"\w+-la\b", r"\w+-ah\b", r"\w+-nu\b",
             r"\w+-tha\b", r"\w+-kulla\b", r"\w+-va\b", r"\w+-ko\b",
         ]
         suffix_count = sum(1 for p in suffix_patterns if re.search(p, text_lower))
-        
-        # Detect if English sentence structure dominates (pure English)
-        english_words = [
-            "the", "is", "are", "and", "for", "with", "need", "want",
-            "looking", "show", "find", "please", "thank", "you",
-        ]
-        english_count = sum(1 for w in words if w in english_words)
-        
+        english_words = {"the", "is", "are", "and", "for", "with", "need", "want", "looking", "show", "find", "please", "thank", "you"}
+        english_count = len(words & english_words)
+
         if tamil_count >= 2 or suffix_count >= 1:
-            return "ta-Latn", "ta-Latn"  # Tanglish
+            return "ta-Latn", "ta-Latn"
         elif tamil_count == 1 and english_count <= 1:
-            return "ta-Latn", "ta-Latn"  # likely Tanglish
-        else:
-            return "en", "en"  # English
+            return "ta-Latn", "ta-Latn"
+
+        return "en", "en" 
     
     def respond(
         self,
@@ -397,18 +534,13 @@ class AIRealEstateAgent:
         if requested:
             self.state.language_request = requested
             self.state.reply_language = requested
-        elif channel == "voice":
-            # The voice agent speaks in casual humanic Tanglish unless explicitly asked for English
-            if self.state.language_request == "en":
-                self.state.reply_language = "en"
-            else:
-                self.state.reply_language = "ta-Latn"
         elif lang_code != "en":
+            # Natural language switch: if customer speaks/types in another language,
+            # answer them in that same language.
             self.state.reply_language = lang_code
         else:
-            self.state.reply_language = (
-                self.state.language_request or lang_code
-            )
+            # Customer used English or neutral phrasing. Honor standing request if any, else English.
+            self.state.reply_language = self.state.language_request or "en"
 
         # Add user message to history
         self.state.add_message("user", user_message, lang_code)
@@ -428,6 +560,25 @@ class AIRealEstateAgent:
         # per-turn focus context still fully describes it to the model.
         if focus_property:
             self.state.focus_property = focus_property
+            reqs = self.state.requirements
+            if not reqs.get("property_type") and focus_property.get("property_type"):
+                reqs["property_type"] = str(focus_property["property_type"]).lower()
+            if not reqs.get("location") and focus_property.get("location"):
+                reqs["location"] = str(focus_property["location"])
+            if not reqs.get("budget") and focus_property.get("price"):
+                p_val = parse_price(str(focus_property["price"]))
+                if p_val:
+                    reqs["budget"] = p_val
+            if not reqs.get("bedrooms") and focus_property.get("no__of__beds"):
+                try:
+                    reqs["bedrooms"] = int(float(str(focus_property["no__of__beds"]).strip()))
+                except (ValueError, TypeError):
+                    pass
+            if not reqs.get("bathrooms") and focus_property.get("no_of_baths"):
+                try:
+                    reqs["bathrooms"] = float(str(focus_property["no_of_baths"]).strip())
+                except (ValueError, TypeError):
+                    pass
             if focus_property.get("source") != "record":
                 pid = focus_property.get("property_id")
                 if not any(p.get("property_id") == pid for p in self.state.recommended_properties):
@@ -501,7 +652,7 @@ class AIRealEstateAgent:
                 "not about any earlier numbered card or a listing discussed "
                 "previously.]"
             )
-        if self.state.reply_language in ("ta", "ta-Latn", "mixed") or channel == "voice":
+        if self.state.reply_language in ("ta-Latn", "mixed"):
             lang_note = (
                 " Reply STRICTLY in natural, friendly contemporary CASUAL TANGLISH (spoken Tamil words written in "
                 "ENGLISH/LATIN LETTERS mixed with standard English real-estate terms like 2BHK, apartment, rent, budget, balcony, sea view, metro) "
@@ -509,12 +660,34 @@ class AIRealEstateAgent:
                 "RULES: "
                 "1. NEVER use pure Tamil script characters (no Unicode \\u0B80-\\u0BFF). Always write in English/Latin letters. "
                 "2. NEVER use Telugu words (e.g. NEVER say 'chesirukku', 'cheyandi', 'ekkada'), Hindi, or Malayalam words. "
-                "3. Speak naturally like a cheerful, friendly Tamil girl/lady chatting casually on WhatsApp or a voice call: "
-                "   - 'Vanakkam! Naan LykAI, Lyka Realty-oda property consultant. Dubai-la enna maadhiri property thedureenga? Buying-ah illa rent-ka?' "
-                "   - 'Super! Dubai Marina-la 2 BHK apartment venum - nalla choice. Unga budget range evlo plan pandreenga?' "
-                "   - 'Aama, kandippa!', 'Seri, puriyudhu!', 'Super!', 'Unga preferences note pannikittaen.' "
-                "   - 'Unga requirement-ku match aana nalla properties kidaichirukku, check pannunga!' "
-                "4. Keep sentences concise, rhythmic, warm, and natural for human speech. End with at most one clear question."
+                "3. NEVER re-introduce yourself (never say 'Vanakkam! Naan LykAI...' or 'Naan LykAI...') after the first greeting. You have already introduced yourself! Acknowledge what the customer just said. "
+                "4. Acknowledge naturally (e.g. 'Kandippa, rent-ku nalla options irukku!', 'Seri, puriyudhu!', 'Super!'). "
+                "5. Keep sentences concise, rhythmic, warm, and natural for human speech (1-3 short sentences). End with at most one clear question."
+            )
+            internal_notes.append(
+                f"[internal — do not mention:{lang_note}]"
+            )
+        elif self.state.reply_language == "ta":
+            lang_note = (
+                " Reply STRICTLY in natural, polite contemporary Tamil script (Unicode \\u0B80-\\u0BFF) "
+                "as a warm, knowledgeable, friendly female real-estate consultant (LykAI). "
+                "RULES: "
+                "1. NEVER re-introduce yourself after the initial greeting. "
+                "2. Directly acknowledge the customer's requirement. "
+                "3. Keep sentences concise and natural for speech (1-3 short sentences). End with at most one clear question."
+            )
+            internal_notes.append(
+                f"[internal — do not mention:{lang_note}]"
+            )
+        elif self.state.reply_language == "en":
+            lang_note = (
+                " Reply in warm, natural, conversational English as LykAI, a friendly female real-estate consultant from Lyka Realty. "
+                "RULES: "
+                "1. Keep sentences concise, rhythmic, and natural for spoken voice (1-3 short sentences). "
+                "2. End with at most one clear question. "
+                "3. NEVER re-introduce yourself (never say 'Hello, I am LykAI...' or 'I am LykAI...') after the first greeting. "
+                "4. Directly acknowledge what the customer just said (e.g. 'Got it, looking to rent!'). "
+                "5. Ask for the single most relevant next detail (e.g. preferred location and budget range)."
             )
             internal_notes.append(
                 f"[internal — do not mention:{lang_note}]"
@@ -615,31 +788,85 @@ class AIRealEstateAgent:
         elif len(self.state.messages) == 1 and "?" not in response:
             req = self.state.requirements
             body = response.lower()
-            if not req.get("location") and not req.get("property_type") and not req.get("budget"):
+            buy_rent = req.get("buy_rent")
+            loc = req.get("location")
+            budget = req.get("budget")
+
+            if buy_rent == "rent":
+                if not loc and not budget:
+                    question = self._rt(
+                        "Which area in Dubai are you looking to rent, and what's your budget range?",
+                        "துபாயில் எந்த பகுதியில் வாடகைக்கு பார்க்கிறீர்கள், உங்கள் பட்ஜெட் எவ்வளவு?",
+                        "Dubai-la endha location-la rent panna paakureenga, budget range evlo?",
+                    )
+                elif not budget and "budget" not in body:
+                    question = self._rt(
+                        "What's your budget range for rent?",
+                        "வாடகைக்கான உங்கள் பட்ஜெட் எவ்வளவு?",
+                        "Rent-kaana unga budget evlo?",
+                    )
+                elif not loc:
+                    question = self._rt(
+                        "Which location in Dubai do you prefer to rent in?",
+                        "துபாயில் எந்த பகுதியில் வாடகைக்கு பார்க்க விரும்புகிறீர்கள்?",
+                        "Dubai-la endha location-la rent panna virumbureenga?",
+                    )
+                else:
+                    question = self._rt(
+                        "How many bedrooms are you looking for?",
+                        "எத்தனை படுக்கையறைகள் (BHK) பார்க்கிறீர்கள்?",
+                        "Ethana bedrooms / BHK paakureenga?",
+                    )
+            elif buy_rent == "buy":
+                if not loc and not budget:
+                    question = self._rt(
+                        "Which area in Dubai are you looking to buy, and what's your budget range?",
+                        "துபாயில் எந்த பகுதியில் வாங்க பார்க்கிறீர்கள், உங்கள் பட்ஜெட் எவ்வளவு?",
+                        "Dubai-la endha area-la buy panna paakureenga, budget range evlo?",
+                    )
+                elif not budget and "budget" not in body:
+                    question = self._rt(
+                        "What's your purchase budget range?",
+                        "வாங்குவதற்கான உங்கள் பட்ஜெட் எவ்வளவு?",
+                        "Purchase budget range evlo?",
+                    )
+                elif not loc:
+                    question = self._rt(
+                        "Which location in Dubai do you prefer?",
+                        "துபாயில் எந்த பகுதி உங்களுக்கு விருப்பம்?",
+                        "Dubai-la endha location ungalukku preference?",
+                    )
+                else:
+                    question = self._rt(
+                        "What type of property are you interested in (apartment or villa)?",
+                        "அபார்ட்மெண்ட் அல்லது வில்லா — எதில் ஆர்வம்?",
+                        "Apartment-ah illa villa-va — edhula interest?",
+                    )
+            elif not loc and not req.get("property_type") and not budget:
                 question = self._rt(
-                    "Looking for a property in Dubai?",
-                    "Dubai-la enna maadhiri property thedureenga? Buying-ah illa rent-ka?",
-                    "Dubai-la property thedureengala?",
+                    "Looking to buy or rent a property in Dubai?",
+                    "துபாயில் சொத்து வாங்கவா அல்லது வாடகைக்கா?",
+                    "Dubai-la property buying-ah illa rent-ka?",
                 )
-            elif not req.get("budget") and "budget" not in body:
+            elif not budget and "budget" not in body:
                 question = self._rt(
                     "What's your budget range?",
+                    "உங்கள் பட்ஜெட் எவ்வளவு?",
                     "Budget range evlo irukkum?",
-                    "Budget evlo?",
                 )
             elif not req.get("buy_rent") and not re.search(
                 r"\b(buy|rent|invest|investment|live in)\b", body,
             ):
                 question = self._rt(
                     "Is this for you to live in or for investment?",
+                    "இது நீங்கள் வசிக்கவா அல்லது முதலீட்டிற்கா?",
                     "Idhu ungaloda use-kaaka, illa investment-ka?",
-                    "Idhu ungaloda use-kaaka, investment-kaaka?",
                 )
             else:
                 question = self._rt(
                     "Anything else I should know about your ideal property?",
+                    "வேறு ஏதேனும் குறிப்பிட்ட விருப்பங்கள் உள்ளதா?",
                     "Vera edhavadhu specific preferences irukka (e.g. metro kitta, sea view, balcony)?",
-                    "Vera ethu theriyum-nu sollunga?",
                 )
             response = response.rstrip() + " " + question
         
@@ -658,6 +885,7 @@ class AIRealEstateAgent:
             "properties": fresh_properties,
             "language_style": lang_style,
             "detected_language": lang_code,
+            "reply_language": self.state.reply_language,
         }
 
     @staticmethod
@@ -749,6 +977,25 @@ class AIRealEstateAgent:
                     f"Unga requirements-ku match aana {n} properties kidaichirukku — "
                     f"price {lo} mudhal {hi} AED varai. Edha mudhalla paakkalaam?"
                 )
+            req = self.state.requirements
+            buy_rent = req.get("buy_rent")
+            loc = req.get("location")
+            budget = req.get("budget")
+            if buy_rent == "rent":
+                if loc:
+                    return f"Kandippa! {loc}-la nalla rental properties irukku. Ethana bedrooms and budget evlo plan panreenga?"
+                return "Kandippa! Dubai-la nalla rental properties thedi tharen. Ungalukku endha area preference (Dubai Marina, Downtown, JVC) and budget evlo?"
+            elif buy_rent == "buy":
+                if loc:
+                    return f"Super! {loc}-la purchase panna prime options irukku. Ethana bedrooms and budget range evlo?"
+                return "Seri! Dubai-la purchase / investment-kaana prime properties paakkalaam. Endha location and budget range plan panreenga?"
+            elif loc:
+                return f"Super! {loc}-la nalla properties irukku. Buying-ah illa rent-ka, and unga budget evlo?"
+            elif budget:
+                return "Unga budget-ku etha maadhiri verified options irukku. Dubai-la endha location preference ungalukku?"
+            elif len(self.state.messages) > 1:
+                return "Seri, unga preferences note pannikittaen. Dubai-la endha area, bedrooms and budget therinja, exact properties kaatren!"
+
             return (
                 "Vanakkam! Naan LykAI, unga AI property consultant. Dubai-la endha location, "
                 "budget evlo, ethana bedrooms paakureenga nu sonneenga na match aagura "
@@ -838,7 +1085,14 @@ class AIRealEstateAgent:
             for label, value in (
                 ("looking to", req.get("buy_rent")),
                 ("location", req.get("location")),
-                ("budget", req.get("budget")),
+                (
+                    "budget",
+                    (
+                        f"{req.get('budget')} {req.get('budget_period')}"
+                        if req.get("budget") and req.get("budget_period")
+                        else req.get("budget")
+                    ),
+                ),
                 ("property type", req.get("property_type")),
                 ("bedrooms", req.get("bedrooms")),
                 ("bathrooms", req.get("bathrooms")),
@@ -852,6 +1106,58 @@ class AIRealEstateAgent:
         if known:
             lines.append("Requirements gathered so far:")
             lines.extend(known)
+
+        if self.state.contact_declined:
+            lines.append(
+                "CONTACT PREFERENCE: The customer explicitly prefers not to share contact details right now or is just browsing. "
+                "DO NOT ask for their phone number, email, or name. Continue answering questions and exploring properties without pressure."
+            )
+        if self.state.callback_request:
+            lines.append(
+                f"CALLBACK REQUESTED: The customer requested a callback ({self.state.callback_request.get('raw')}). "
+                "Warmly acknowledge that a Lyka Realty property consultant will contact them."
+            )
+        if self.state.viewing_interest:
+            lines.append(
+                f"VIEWING INTEREST: The customer expressed interest in viewing a property ({self.state.viewing_interest.get('raw')}). "
+                "Acknowledge that our specialist will coordinate a viewing appointment."
+            )
+        if self.state.handoff_requested:
+            lines.append(
+                "AGENT HANDOFF REQUESTED: The customer requested to speak with a human agent. "
+                "Assure them that our specialist will follow up with them directly."
+            )
+
+        # Stage + genuinely-missing core facts. Keeps the model from
+        # re-qualifying when everything needed is already known, and focuses
+        # its single follow-up question on what is actually absent.
+        lines.append(f"STAGE: {self.conversation_stage()}.")
+        outstanding = self.outstanding_facts()
+        if outstanding:
+            lines.append(
+                "OUTSTANDING (not yet known — the only core facts still "
+                "missing; never ask about anything in the block above): "
+                + ", ".join(outstanding)
+            )
+        else:
+            lines.append(
+                "OUTSTANDING: none — every core requirement is known. Do NOT "
+                "re-qualify (no intent/location/type/bedroom/budget questions); "
+                "help directly instead: refine results, compare options, or "
+                "offer a viewing / human follow-up."
+            )
+
+        # What the backend actually staged for THIS turn — the model may only
+        # claim a save that is marked "yes" here (never an unconfirmed save).
+        status = self.persistence_status or {}
+        lines.append(
+            "PERSISTENCE (server-verified this turn): customer preferences "
+            f"saved: {'yes' if status.get('preferences') else 'not yet'}; "
+            f"lead record saved: {'yes' if status.get('lead') else 'not yet'}. "
+            "Confirm a save ONLY for items marked 'yes' — otherwise say you "
+            "have NOTED the details. Never invent a saved lead, follow-up, or "
+            "viewing."
+        )
 
         recs = self.state.recommended_properties[:10]
         if fresh_properties:
@@ -1017,13 +1323,12 @@ class AIRealEstateAgent:
         in conversation state (only if not already set - ask once principle).
         """
         msg = message.lower()
-        # Tamil numerals (௦-௯) -> ASCII so "௩ மில்லியன்" parses like "3 million"
-        msg = msg.translate({
-            ord("\u0BE6"): "0", ord("\u0BE7"): "1", ord("\u0BE8"): "2",
-            ord("\u0BE9"): "3", ord("\u0BEA"): "4", ord("\u0BEB"): "5",
-            ord("\u0BEC"): "6", ord("\u0BED"): "7", ord("\u0BEE"): "8",
-            ord("\u0BEF"): "9",
-        })
+        # Multilingual numerals translation (Tamil ௦-௯, Arabic ٠-٩, Persian ۰-۹, Devanagari ०-९)
+        arabic_num_trans = {ord(c): str(i) for i, c in enumerate("٠١٢٣٤٥٦٧٨٩")}
+        persian_num_trans = {ord(c): str(i) for i, c in enumerate("۰۱۲۳۴۵۶۷۸۹")}
+        devanagari_num_trans = {ord(c): str(i) for i, c in enumerate("०१२३४५६७८९")}
+        tamil_num_trans = {ord(c): str(i) for i, c in enumerate("௦௧௨௩௪௫௬௭௮௯")}
+        msg = msg.translate({**arabic_num_trans, **persian_num_trans, **devanagari_num_trans, **tamil_num_trans})
         
         # Check for explicit preference change/revision intent:
         is_change = bool(re.search(
@@ -1031,16 +1336,19 @@ class AIRealEstateAgent:
             r"மாத்து|வேற|பதிலா",
             msg,
         ))
+        if is_change:
+            # Clear stale recommendations when customer actively changes criteria
+            self.state.recommended_properties = []
 
-        # Buy / Rent intent (English + common Tamil words)
+        # Buy / Rent intent (Multilingual: English, Tamil, Arabic, Hindi, French)
         if self.state.requirements.get("buy_rent") is None or is_change:
             if re.search(
-                r"\b(buy|purchas|invest(ment)?|own|for myself|buying)\b|வாங்க",
+                r"\b(buy|purchas|invest(ment)?|own|for myself|buying)\b|வாங்க|شراء|شرا|شري|تملك|استثمار|للشراء|खरीद|खरीदना|इन्वेस्ट|acheter|achat",
                 msg,
             ):
                 self.state.requirements["buy_rent"] = "buy"
             elif re.search(
-                r"\b(rent|rental|lease|tenant|renting|hir(e|ing))\b|வாடகை",
+                r"\b(rent|rental|lease|tenant|renting|hir(e|ing))\b|வாடகை|إيجار|ايجار|أجار|استئجار|كراء|للإيجار|للايجار|किराया|किराए|रेंट|louer|location",
                 msg,
             ):
                 self.state.requirements["buy_rent"] = "rent"
@@ -1055,6 +1363,8 @@ class AIRealEstateAgent:
                 price_ctx = re.search(
                     r"(budget|aed|price|under|below|around|within|max|"
                     r"crore|lakh|million|mn|\bcost|afford|"
+                    r"ميزانية|بميزانية|درهم|د\.إ|مليون|"
+                    r"बजट|रुपये|लाख|करोड़|"
                     r"விலை|பட்ஜெட்|குள|வரை|லட்சம்|கோடி|மில்லியன்)", msg,
                 )
                 if price_ctx or is_change:
@@ -1083,16 +1393,29 @@ class AIRealEstateAgent:
                     # Title-case the location nicely
                     new_loc = loc.title()
                     break
-            # Tamil-script city names -> dataset location ("துபாயில்..." -> Dubai)
+            # Multilingual city names -> dataset location
             if new_loc is None:
-                ta_locations = [
+                multi_locations = [
+                    ("دبي مارينا", "Dubai Marina"),
+                    ("وسط مدينة دبي", "Downtown Dubai"),
+                    ("داون تاون", "Downtown Dubai"),
+                    ("نخلة جميرا", "Palm Jumeirah"),
+                    ("الخليج التجاري", "Business Bay"),
+                    ("دبي", "Dubai"),
+                    ("أبوظبي", "Abu Dhabi"),
+                    ("ابوظبي", "Abu Dhabi"),
+                    ("الشارقة", "Sharjah"),
+                    ("عجمان", "Ajman"),
+                    ("दुबई मरीना", "Dubai Marina"),
+                    ("दुबई", "Dubai"),
+                    ("अबू धाबी", "Abu Dhabi"),
                     ("துபாய", "Dubai"),       # துபாய் / துபாயில் / துபாயின்
                     ("அபுதாபி", "Abu Dhabi"),
                     ("ஷார்ஜா", "Sharjah"),
                     ("அஜ்மான்", "Ajman"),
                 ]
-                for ta_name, loc in ta_locations:
-                    if ta_name in msg:
+                for non_en_name, loc in multi_locations:
+                    if non_en_name in msg:
                         new_loc = loc
                         break
             # Fallback: "in <city>"
@@ -1113,11 +1436,16 @@ class AIRealEstateAgent:
                 "studio": "studio", "hotel apartment": "hotel apartment",
                 "land": "land", "plot": "land", "office": "office",
                 "shop": "shop", "villa compound": "villa",
-                # Forgiving Tamil prefixes: cover அபார்ட்மென்ட், அபார்ட்மென்டு
-                # and colloquial spellings; வில்லா = villa, வீடு = house/villa
+                # Forgiving Multilingual property types (Tamil, Arabic, Hindi)
                 "அபார்ட்மெ": "apartment",
                 "வில்லா": "villa", "வீடு": "villa",
                 "ஸ்டுடியோ": "studio", "டவுன்ஹவுஸ்": "townhouse",
+                "شقة": "apartment", "شقق": "apartment",
+                "فيلا": "villa", "فلل": "villa",
+                "تاون هاوس": "townhouse", "بنتهاوس": "penthouse",
+                "استوديو": "studio",
+                "फ्लैट": "apartment", "अपार्टमेंट": "apartment",
+                "विला": "villa",
             }
             for key, value in type_map.items():
                 if re.search(r"\b" + re.escape(key) + r"\b" if key.isascii() else re.escape(key), msg):
@@ -1128,14 +1456,19 @@ class AIRealEstateAgent:
         # be a space, nothing, or a hyphen — "2-bedroom" is the most common
         # English spelling and must not fall through to an unfiltered search.
         if self.state.requirements.get("bedrooms") is None or is_change:
-            bed_match = re.search(
-                r"(\d+)[\s-]*(?:bed|bhk|bedroom|பெட்ரூம்|பெட்)",
-                msg,
-            )
-            if bed_match:
-                self.state.requirements["bedrooms"] = int(bed_match.group(1))
-            elif re.search(r"\bstudio\b|ஸ்டுடியோ", msg):
+            if re.search(r"\b(?:غرفتين|غرفتان)\b", msg):
+                self.state.requirements["bedrooms"] = 2
+            elif re.search(r"\b(?:غرفة\s+واحدة|غرفة)\b", msg) and "غرفتين" not in msg and "غرف" not in msg:
+                self.state.requirements["bedrooms"] = 1
+            elif re.search(r"\bstudio\b|ஸ்டுடியோ|استوديو", msg):
                 self.state.requirements["bedrooms"] = 0
+            else:
+                bed_match = re.search(
+                    r"(\d+)[\s-]*(?:bed|bhk|bedroom|बीएचके|कमरे|غرف|غرفة|பெட்ரூம்|பெட்)",
+                    msg,
+                )
+                if bed_match:
+                    self.state.requirements["bedrooms"] = int(bed_match.group(1))
 
         # Bathrooms
         if self.state.requirements.get("bathrooms") is None or is_change:
@@ -1194,11 +1527,72 @@ class AIRealEstateAgent:
         elif "unfurnished" in current_amenities and not self.state.requirements.get("furnishing"):
             self.state.requirements["furnishing"] = "Unfurnished"
         
+        # Explicit Consent tracking (grant vs withdrawal)
+        consent_grant_match = re.search(
+            r"\b(give consent|i consent|agree to be contacted|yes you can call|yes you can contact|permission to call|permission to contact|you can call me|you can contact me)\b",
+            msg,
+        )
+        consent_withdraw_match = re.search(
+            r"\b(withdraw (?:my )?consent|don'?t contact me anymore|do not contact me|stop calling|remove my number|remove my details|cancel (?:my )?callback)\b",
+            msg,
+        )
+        if consent_grant_match:
+            self.state.consent_recorded = "granted"
+            self.state.contact_declined = False
+        elif consent_withdraw_match:
+            self.state.consent_recorded = "withdrawn"
+            self.state.contact_declined = True
+
+        # Contact decline detection
+        decline_match = re.search(
+            r"\b(don'?t want to give|do not want to give|no phone|no email|no number|no thanks|not now|not yet|just browsing|prefer not to share|skip|don'?t contact)\b|"
+            r"\b(summa|venam|vendaam|ippo venam|ippo vendaam|theva illa|thara mudiyadhu)\b",
+            msg,
+        )
+        if decline_match and not (re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", message) or re.search(r"\d{8,14}", message.replace(" ", ""))):
+            self.state.contact_declined = True
+
+        # Callback request detection
+        callback_match = re.search(
+            r"\b(call me|callback|call tomorrow|call later|give me a call|schedule a call|arrange a call|phone me)\b|"
+            r"\b(call pannunga|call pannalam|pesalam)\b",
+            msg,
+        )
+        if callback_match:
+            self.state.callback_request = {"requested": True, "raw": message.strip()}
+
+        # Viewing interest detection
+        viewing_match = re.search(
+            r"\b(schedule a viewing|book a viewing|viewing|visit the property|see the property|site visit|view it in person|arrange viewing)\b|"
+            r"\b(property paakanum|veeda paakanum|viewing venum)\b",
+            msg,
+        )
+        if viewing_match:
+            self.state.viewing_interest = {"requested": True, "raw": message.strip()}
+
+        # Human handoff detection
+        handoff_match = re.search(
+            r"\b((?:speak|talk|chat|connect)\s+(?:to|with)\s+(?:an?\s+)?(?:agent|human|person|consultant|specialist|advisor|broker)|human agent|sales agent|real consultant|broker)\b|"
+            r"\b(agent kitta pesanum|human kitta pesanum|direct-ah pesanum)\b",
+            msg,
+        )
+        if handoff_match:
+            self.state.handoff_requested = True
+
+        # Contact preference (channel)
+        if re.search(r"\bwhatsapp\b", msg):
+            self.state.contact_preference = "whatsapp"
+        elif re.search(r"\b(phone call|voice call|call me|by phone)\b", msg):
+            self.state.contact_preference = "call"
+        elif re.search(r"\b(email|mail)\b", msg):
+            self.state.contact_preference = "email"
+
         # Contact info (name / phone / email)
         if not self.state.contact.get("email"):
             email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", message)
             if email_match:
                 self.state.contact["email"] = email_match.group(0)
+                self.state.contact_declined = False
         if not self.state.contact.get("phone"):
             phone_patterns = [
                 r"(?:\+?971[\s-]?)?(?:0)?5[0-9][\s-]?\d{3}[\s-]?\d{4}",
@@ -1215,6 +1609,7 @@ class AIRealEstateAgent:
                     digits = re.sub(r"[^\d+]", "", raw_val)
                     if 9 <= len(digits.lstrip("+")) <= 14:
                         self.state.contact["phone"] = digits
+                        self.state.contact_declined = False
                         break
         # Name extraction
         name_patterns = [
@@ -1237,6 +1632,25 @@ class AIRealEstateAgent:
                 ) and len(cand) >= 2:
                     self.state.contact["name"] = cand.title() if cand.isascii() else cand
                     break
+
+        # Compound response fallback: e.g. "fathima beevi, 8778937335" or "8778937335 Fathima"
+        if not self.state.contact.get("name") and self.state.contact.get("phone"):
+            # Exclude instructional phrasing ("reach me at", "call me on", "contact on")
+            msg_lower = message.lower()
+            if not re.search(r"\b(reach|contact|text|ping|dial|ring|sms|send)\b", msg_lower):
+                cleaned = re.sub(r"[\d+()\-]", " ", message)
+                cleaned = re.sub(r"[\w.+-]+@[\w-]+\.[\w.]+", " ", cleaned)
+                cleaned = re.sub(r"[,\;:\/\?#]", " ", cleaned).strip()
+                words = [w for w in cleaned.split() if len(w) >= 2]
+                stopwords = {
+                    "phone", "number", "whatsapp", "call", "me", "my", "is", "yes", "no", "hi", "hello",
+                    "thanks", "thank", "you", "contact", "please", "confirm", "this", "details", "here",
+                    "tamil", "english", "agent", "realty", "lyka", "at", "on", "via", "to"
+                }
+                cand_words = [w for w in words if w.lower() not in stopwords]
+                if 1 <= len(cand_words) <= 3 and all(w.isalpha() for w in cand_words):
+                    cand_name = " ".join(cand_words)
+                    self.state.contact["name"] = cand_name.title()
     
     def _handle_followup(self, user_message: str) -> Optional[Dict[str, Any]]:
         """
@@ -1363,6 +1777,8 @@ class AIRealEstateAgent:
         try:
             result = search_properties(db=db, **criteria)
             props = result.get("results", [])
+            for p in props:
+                p["source"] = "dataset"
         finally:
             db.close()
         
@@ -1569,6 +1985,98 @@ class AIRealEstateAgent:
         
         return result
     
+    def export_memory(self) -> Dict[str, Any]:
+        """Structured memory for the conversations.memory JSON column."""
+        data = self.state.memory_dict()
+        data["stage"] = self.conversation_stage()
+        return data
+
+    def load_memory(self, data: Dict[str, Any]) -> bool:
+        """Restore persisted memory into this agent. Returns True on success."""
+        if not isinstance(data, dict):
+            return False
+        self.state.apply_memory(data)
+        return True
+
+    def merge_llm_extractions(self, message: str) -> bool:
+        """Second extraction layer: LLM structured updates merged FIELD-BY-FIELD
+        into the existing state (the deterministic rules have already run).
+
+        Only fields the customer explicitly stated in THIS message can change;
+        every other stored slot is retained (merge, never replace). Returns
+        True when anything changed. Never raises — provider failure means the
+        rules-only baseline stands.
+        """
+        try:
+            updates = preference_extraction.extract_updates(
+                message,
+                requirements=self.state.requirements,
+                contact=self.state.contact,
+            )
+        except Exception as exc:  # noqa: BLE001 — chat must survive extraction
+            logger.warning("LLM preference extraction failed (rules-only): %s", exc)
+            return False
+        if not updates:
+            return False
+
+        changed = False
+        for key, value in (updates.get("requirements") or {}).items():
+            if key not in preference_extraction.ALLOWED_REQUIREMENTS:
+                continue
+            if self.state.requirements.get(key) != value:
+                self.state.requirements[key] = value
+                changed = True
+        for key, value in (updates.get("contact") or {}).items():
+            if key in ("name", "phone", "email") and value and self.state.contact.get(key) != value:
+                self.state.contact[key] = value
+                changed = True
+        return changed
+
+    def conversation_stage(self) -> str:
+        """Current stage of the conversation (deterministic, no invention).
+
+        greeting      → nothing gathered yet
+        qualifying    → some requirements known, no cards shown yet
+        recommending  → cards have been shown, no contact details yet
+        contact_captured → phone/email on record (ready for human follow-up)
+        """
+        if self.state.contact.get("phone") or self.state.contact.get("email"):
+            return "contact_captured"
+        if self.state.recommended_properties:
+            return "recommending"
+        req = self.state.requirements
+        filled = sum(
+            1 for k, v in req.items()
+            if k != "notes" and v not in (None, "", [])
+        )
+        return "qualifying" if filled else "greeting"
+
+    def outstanding_facts(self) -> List[str]:
+        """Core qualification facts not yet known (factual — drives the
+        OUTSTANDING line so the model asks only for what is genuinely missing)."""
+        req = self.state.requirements
+        labels = (
+            ("buy_rent", "rent or buy (intent)"),
+            ("location", "preferred location"),
+            ("property_type", "property type"),
+            ("bedrooms", "bedrooms"),
+            ("budget", "budget"),
+        )
+        return [
+            label for key, label in labels
+            if req.get(key) in (None, "", [])
+        ]
+
+    def _has_meaningful_enquiry(self) -> bool:
+        """True when the conversation contains a real property enquiry — enough
+        to deserve a lead record even without contact details (anonymous
+        visitors are supported; the conversation link is their stable id)."""
+        req = self.state.requirements
+        core = ("buy_rent", "location", "property_type", "bedrooms", "budget")
+        if any(req.get(k) not in (None, "", []) for k in core):
+            return True
+        return bool(self.state.contact.get("name"))
+
     def _should_collect_lead(self) -> bool:
         """Determine if enough information has been collected to create a lead.
 
@@ -1599,7 +2107,16 @@ class AIRealEstateAgent:
         """Get all collected data for lead creation (types match the DB columns)."""
         budget = self.state.requirements.get("budget")
         if isinstance(budget, (int, float)):
-            budget = f"AED {budget:,.0f}"
+            # Keep the rental/purchase period with the displayed budget — the
+            # lead codec reads these exact tokens ("per year"/"per month"/
+            # "one-time") back deterministically. No period → no token (never
+            # assume every budget is yearly/monthly).
+            period_token = {
+                "yearly": "per year",
+                "monthly": "per month",
+                "one_time": "one-time",
+            }.get(str(self.state.requirements.get("budget_period") or "").lower())
+            budget = f"AED {budget:,.0f}" + (f" {period_token}" if period_token else "")
 
         bedrooms = self.state.requirements.get("bedrooms")
         try:
@@ -1622,6 +2139,14 @@ class AIRealEstateAgent:
         amenities_list = list(dict.fromkeys(amenities_val))
 
         notes_parts = []
+        if self.state.contact_preference:
+            notes_parts.append(f"Contact Preference: {self.state.contact_preference}")
+        if self.state.callback_request:
+            notes_parts.append(f"Callback Request: {self.state.callback_request.get('raw')}")
+        if self.state.viewing_interest:
+            notes_parts.append(f"Viewing Interest: {self.state.viewing_interest.get('raw')}")
+        if self.state.handoff_requested:
+            notes_parts.append("Handoff Requested: Yes")
         if self.state.requirements.get("investment_purpose"):
             notes_parts.append(f"Purpose: {self.state.requirements['investment_purpose']}")
         if self.state.requirements.get("timeline"):
@@ -1632,6 +2157,7 @@ class AIRealEstateAgent:
             notes_parts.append(str(self.state.requirements.get("notes")))
 
         return {
+            "consent_recorded": self.state.consent_recorded,
             "name": self.state.contact.get("name"),
             "phone": self.state.contact.get("phone"),
             "email": self.state.contact.get("email"),

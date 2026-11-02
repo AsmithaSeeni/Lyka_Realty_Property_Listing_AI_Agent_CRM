@@ -1,6 +1,7 @@
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime, Text,
-    Boolean, ForeignKey, UniqueConstraint, Index, CheckConstraint,
+    create_engine, Column, Integer, String, Float, DateTime, Date, Text,
+    Boolean, ForeignKey, UniqueConstraint, Index, CheckConstraint, text,
+    LargeBinary,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
@@ -8,7 +9,7 @@ from datetime import datetime
 import hashlib
 import secrets
 
-from app.config import settings
+from app.config import ACTIVE_DB_FILE, settings
 
 # Phase 1: the database URL is explicit and CWD-independent.
 # - Default (DATABASE_URL unset/empty): the ACTIVE database resolved to an
@@ -90,27 +91,33 @@ def _engine_connect_args() -> dict:
     return {}
 
 
+def _engine_kwargs() -> dict:
+    kwargs = {
+        "echo": False,
+        "connect_args": _engine_connect_args(),
+    }
+    if "postgresql" in SQLALCHEMY_DATABASE_URL:
+        kwargs.update({
+            "pool_size": 10,
+            "max_overflow": 20,
+            "pool_timeout": 30,
+            "pool_pre_ping": True,
+            "pool_recycle": 300,
+        })
+    return kwargs
+
+
 try:
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL,
-        connect_args=_engine_connect_args(),
-        echo=False,
+        **_engine_kwargs(),
     )
 except Exception as _engine_exc:
-    if "sqlite.libsql" in str(_engine_exc) or "sqlite+libsql" in str(_engine_exc):
-        import logging
-        logging.getLogger(__name__).warning(
-            "sqlalchemy-libsql dialect not available on this platform (%s). "
-            "Using local SQLite fallback for local processes.",
-            _engine_exc,
-        )
-        engine = create_engine(
-            "sqlite:///" + settings.ACTIVE_DB_FILE.as_posix(),
-            connect_args={"check_same_thread": False, "timeout": settings.SQLITE_BUSY_TIMEOUT_SECONDS},
-            echo=False,
-        )
-    else:
-        raise
+    # Fail fast: PostgreSQL is the authoritative database; no silent fallbacks.
+    host_info = SQLALCHEMY_DATABASE_URL.split("@")[-1] if "@" in SQLALCHEMY_DATABASE_URL else "target database"
+    raise RuntimeError(
+        f"FATAL: Failed to initialize authoritative database engine for '{host_info}': {_engine_exc}"
+    ) from _engine_exc
 
 # ---------------- Phase 9: per-connection SQLite safety contract ----------------
 # SQLite enforces foreign keys OFF by default and SQLAlchemy never turns them
@@ -157,15 +164,14 @@ def apply_sqlite_pragmas(dbapi_connection) -> None:
         cursor.close()
 
 
-if _is_local_sqlite(SQLALCHEMY_DATABASE_URL):
+if engine.dialect.name == "sqlite" and not str(engine.url).startswith(_LIBSQL_URL_PREFIXES):
     from sqlalchemy import event
 
     @event.listens_for(engine, "connect")
     def _sqlite_connection_pragmas(dbapi_connection, _connection_record):
         # Registered before init_db() can run, so even the very first
         # connection (create_all/migrations/seeding) gets the contract.
-        # Never registered for libSQL remotes: applying local-filesystem
-        # PRAGMAs over a remote Turso connection is not part of its contract.
+        # Never registered for libSQL remotes or PostgreSQL engines.
         apply_sqlite_pragmas(dbapi_connection)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -209,13 +215,25 @@ class Agent(Base):
     # Consecutive failed sign-ins since the last success. Reset to 0 on a
     # successful login. Purely a counter — no passwords/timestamps of failures.
     failed_login_count = Column(Integer, nullable=False, default=0)
+    must_change_password = Column(Boolean, nullable=False, default=False)
     # When set (and in the future) the account is temporarily locked after too
     # many consecutive failures. NULL = not locked.
     locked_until = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     sessions = relationship("AgentSession", backref="agent", cascade="all, delete-orphan")
-    assigned_leads = relationship("Lead", backref="assigned_agent", lazy="selectin")
+    assigned_leads = relationship(
+        "Lead",
+        foreign_keys="[Lead.assigned_agent_id]",
+        backref="assigned_agent",
+        lazy="selectin",
+    )
+    created_leads = relationship(
+        "Lead",
+        foreign_keys="[Lead.creator_agent_id]",
+        backref="creator_agent",
+        lazy="selectin",
+    )
     role_assignments = relationship(
         "AgentRole", backref="agent", cascade="all, delete-orphan", lazy="selectin"
     )
@@ -318,10 +336,23 @@ class Customer(Base):
     phone = Column(String, nullable=True)
     email = Column(String, nullable=True)
     password_hash = Column(String, nullable=True)  # bcrypt; NULL = guest
+    preferred_locations = Column(Text, nullable=True)
+    property_type = Column(String, nullable=True)
+    bedrooms_min = Column(Integer, nullable=True)
+    bedrooms_max = Column(Integer, nullable=True)
+    budget_min = Column(Float, nullable=True)
+    budget_max = Column(Float, nullable=True)
+    budget_currency = Column(String, nullable=False, default="AED")
+    purpose = Column(String, nullable=True)  # buy | rent | investment | self_use
+    preferred_contact_method = Column(String, nullable=True)  # email | phone | whatsapp
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     conversations = relationship("Conversation", backref="customer", lazy="selectin")
+    saved_properties = relationship("SavedProperty", back_populates="customer", lazy="selectin", cascade="all, delete-orphan")
+    appointments = relationship("Appointment", back_populates="customer", lazy="selectin")
+    communications = relationship("CustomerCommunication", back_populates="customer", lazy="selectin", cascade="all, delete-orphan")
+    notifications = relationship("CustomerNotification", back_populates="customer", lazy="selectin", cascade="all, delete-orphan")
 
     @property
     def is_account(self) -> bool:
@@ -344,6 +375,8 @@ class SavedProperty(Base):
     customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False, index=True)
     property_id = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    customer = relationship("Customer", foreign_keys=[customer_id], back_populates="saved_properties", lazy="selectin")
 
 
 # ---------------------------------------------------------------- CRM entities
@@ -368,6 +401,7 @@ class Lead(Base):
     status = Column(String, default="new")  # new|contacted|qualified|viewing|negotiation|closed_won|closed_lost
     source = Column(String, default="AI Assistant")  # where the lead came from
     assigned_agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True, index=True)
+    creator_agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True, index=True)
     last_interaction_at = Column(DateTime, nullable=True)  # last customer activity
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -387,6 +421,20 @@ class Lead(Base):
     clarification_questions = Column(Text, nullable=True)  # JSON array of suggested questions
     timeline_days = Column(Integer, nullable=True)      # normalized timeline in days, NULL = unknown
     extraction_source = Column(String, nullable=True)   # provenance: explicit|inferred|mixed|chat_regex
+
+    # ---------------- AI brain upgrade: transparent lead temperature -------
+    # temperature: hot|warm|cold (NULL = not yet classified — never fabricated).
+    # temperature_rationale: JSON {temperature, rules fired, evidence, at}.
+    # temperature_source: auto|manual — a human's manual choice is never
+    # silently overwritten by the automatic rules (see lead_temperature.py).
+    temperature = Column(String, nullable=True)
+    temperature_rationale = Column(Text, nullable=True)
+    temperature_source = Column(String, nullable=True)
+    temperature_updated_at = Column(DateTime, nullable=True)
+    # Chat-derived context for the dashboard (staff notes stay in `notes`).
+    summary = Column(Text, nullable=True)               # short conversation summary
+    last_customer_message = Column(Text, nullable=True) # most recent customer message
+    is_synthetic = Column(Boolean, nullable=False, default=False, index=True)
 
     conversations = relationship("Conversation", backref="lead", lazy="selectin")
     property_recommendations = relationship(
@@ -435,6 +483,11 @@ class Conversation(Base):
         foreign_keys="PropertyRecommendation.conversation_id",
     )
     lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True, index=True)
+    # Persistent structured conversation memory (JSON): requirements, contact,
+    # language pins, stage. Written after every chat turn and restored on a
+    # cold start, so preference slots no longer depend on re-running the
+    # lossy regex extractor over the transcript.
+    memory = Column(Text, nullable=True)
 
 
 class Message(Base):
@@ -518,10 +571,30 @@ class Property(Base):
     is_approved = Column(Boolean, nullable=False, default=False)
     is_demo = Column(Boolean, nullable=False, default=False)  # fictional demo data?
     source = Column(String, nullable=False, default="manual")  # manual | demo_seed
+
+    # ---------------- Phase I: Lifecycle, Verification & Media ----------------
+    is_published = Column(Boolean, nullable=False, default=False, server_default=text("0"), index=True)
+    verification_status = Column(String, nullable=False, default="unverified", server_default="unverified", index=True)  # unverified | pending_review | verified | rejected
+    rejection_reason = Column(Text, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    images = Column(Text, nullable=False, default="[]", server_default="'[]'")  # JSON array of image objects/URLs
+    primary_image = Column(String, nullable=True)
+    source_id = Column(String, nullable=True, index=True)
+    import_batch_id = Column(String, nullable=True, index=True)
+    archived_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(
         DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+    def __init__(self, **kwargs):
+        # Backward compatibility for legacy tests & seeders:
+        if kwargs.get("is_approved") and "is_published" not in kwargs:
+            kwargs["is_published"] = True
+            if "verification_status" not in kwargs:
+                kwargs["verification_status"] = "verified"
+        super().__init__(**kwargs)
 
     __table_args__ = (
         CheckConstraint("purpose IN ('sale','rent','lease')",
@@ -538,6 +611,47 @@ class Property(Base):
         Index("ix_properties_price", "price"),
         Index("ix_properties_property_type", "property_type"),
         Index("ix_properties_location_purpose", "location", "purpose"),
+    )
+
+    stored_images = relationship(
+        "PropertyImage",
+        back_populates="property",
+        cascade="all, delete-orphan",
+        order_by="PropertyImage.display_order.asc(), PropertyImage.id.asc()",
+    )
+
+
+class PropertyImage(Base):
+    """PostgreSQL persistent binary image storage for property listings (Stage 6I).
+
+    Stores actual image byte data (BYTEA in PostgreSQL) uploaded directly from local admin computer.
+    Validated by magic byte file signatures (JPEG, PNG, WebP) up to 10MB per file.
+    """
+    __tablename__ = "property_images"
+
+    id = Column(Integer, primary_key=True, index=True)
+    property_id = Column(Integer, ForeignKey("properties.id", ondelete="CASCADE"), nullable=False, index=True)
+    image_data = Column(LargeBinary, nullable=False)
+    mime_type = Column(String(50), nullable=False)  # image/jpeg | image/png | image/webp
+    original_filename = Column(String(255), nullable=True)
+    file_size = Column(Integer, nullable=False)
+    image_hash = Column(String(64), nullable=True, index=True)
+    display_order = Column(Integer, nullable=False, default=0)
+    is_primary = Column(Boolean, nullable=False, default=False, index=True)
+    alt_text = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    property = relationship("Property", back_populates="stored_images")
+
+    __table_args__ = (
+        CheckConstraint(
+            "mime_type IN ('image/jpeg', 'image/png', 'image/webp')",
+            name="ck_property_images_mime",
+        ),
+        Index("ix_property_images_prop_primary", "property_id", "is_primary"),
     )
 
 
@@ -571,6 +685,418 @@ class FollowUp(Base):
     )
 
 
+
+class Appointment(Base):
+    """Appointment & property viewing record (Phase F)."""
+    __tablename__ = "appointments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=True, index=True)
+    additional_property_ids = Column(Text, nullable=False, default="[]")
+    assigned_agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    appointment_type = Column(String, nullable=False, default="viewing")
+    start_at = Column(DateTime, nullable=False, index=True)
+    end_at = Column(DateTime, nullable=False, index=True)
+    timezone = Column(String, nullable=False, default="Asia/Dubai")
+    meeting_method = Column(String, nullable=False, default="in_person")
+    location_or_link = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="scheduled", index=True)
+    customer_confirmation_status = Column(String, nullable=False, default="pending")
+    notes = Column(Text, nullable=True)
+    outcome = Column(Text, nullable=True)
+    viewing_outcome = Column(String, nullable=True)
+    customer_feedback = Column(Text, nullable=True)
+    next_action = Column(Text, nullable=True)
+    cancellation_reason = Column(Text, nullable=True)
+    reschedule_reason = Column(Text, nullable=True)
+    reschedule_history = Column(Text, nullable=False, default="[]")
+    conflict_override_reason = Column(Text, nullable=True)
+    idempotency_key = Column(String, unique=True, nullable=True, index=True)
+    created_by_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    updated_by_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    lead = relationship("Lead", foreign_keys=[lead_id], lazy="selectin")
+    property_record = relationship("Property", foreign_keys=[property_id], lazy="selectin")
+    assigned_agent = relationship("Agent", foreign_keys=[assigned_agent_id], lazy="selectin")
+    customer = relationship("Customer", foreign_keys=[customer_id], back_populates="appointments", lazy="selectin")
+
+    __table_args__ = (
+        CheckConstraint(
+            "appointment_type IN ('viewing','callback','consultation','negotiation_meeting','documentation_meeting')",
+            name="ck_appointments_type",
+        ),
+        CheckConstraint(
+            "meeting_method IN ('in_person','phone','video')",
+            name="ck_appointments_method",
+        ),
+        CheckConstraint(
+            "status IN ('scheduled','confirmed','completed','cancelled','rescheduled','no_show')",
+            name="ck_appointments_status",
+        ),
+        CheckConstraint(
+            "customer_confirmation_status IN ('pending','confirmed','declined','reschedule_requested')",
+            name="ck_appointments_cust_conf",
+        ),
+        Index("ix_appointments_agent_window", "assigned_agent_id", "start_at", "end_at"),
+        Index("ix_appointments_lead_status", "lead_id", "status"),
+    )
+
+
+class Offer(Base):
+    """Property purchase/rent/lease offer and negotiation trail (Phase F)."""
+    __tablename__ = "offers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=False, index=True)
+    assigned_agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    transaction_intent = Column(String, nullable=False, default="purchase")
+    asking_price = Column(Float, nullable=False)
+    offered_price = Column(Float, nullable=False)
+    current_price = Column(Float, nullable=False)
+    currency = Column(String, nullable=False, default="AED")
+    payment_frequency = Column(String, nullable=True)
+    cheques_count = Column(Integer, nullable=True)
+    financing_type = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="draft", index=True)
+    submitted_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    notes = Column(Text, nullable=True)
+    terms_conditions = Column(Text, nullable=True)
+    document_references = Column(Text, nullable=False, default="[]")
+    negotiation_history = Column(Text, nullable=False, default="[]")
+    idempotency_key = Column(String, unique=True, nullable=True, index=True)
+    created_by_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    updated_by_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    lead = relationship("Lead", foreign_keys=[lead_id], lazy="selectin")
+    property_record = relationship("Property", foreign_keys=[property_id], lazy="selectin")
+    assigned_agent = relationship("Agent", foreign_keys=[assigned_agent_id], lazy="selectin")
+    customer = relationship("Customer", foreign_keys=[customer_id], lazy="selectin")
+
+    __table_args__ = (
+        CheckConstraint(
+            "transaction_intent IN ('purchase','rent','lease')",
+            name="ck_offers_intent",
+        ),
+        CheckConstraint(
+            "status IN ('draft','submitted','countered','accepted','rejected','withdrawn','expired')",
+            name="ck_offers_status",
+        ),
+        CheckConstraint("asking_price >= 0", name="ck_offers_asking_price"),
+        CheckConstraint("offered_price > 0", name="ck_offers_offered_price"),
+        CheckConstraint("current_price > 0", name="ck_offers_current_price"),
+        Index("ix_offers_lead_status", "lead_id", "status"),
+        Index("ix_offers_property_status", "property_id", "status"),
+    )
+
+
+class Deal(Base):
+    """Real-estate deal & transaction pipeline record (Phase F)."""
+    __tablename__ = "deals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    deal_reference = Column(String, unique=True, nullable=False, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=False, index=True)
+    offer_id = Column(Integer, ForeignKey("offers.id"), nullable=True, index=True)
+    assigned_agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    transaction_type = Column(String, nullable=False, default="purchase")
+    agreed_amount = Column(Float, nullable=False)
+    currency = Column(String, nullable=False, default="AED")
+    payment_frequency = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="qualification", index=True)
+    estimated_commission = Column(Float, nullable=True)
+    estimated_commission_pct = Column(Float, nullable=True)
+    actual_commission = Column(Float, nullable=True)
+    commission_status = Column(String, nullable=False, default="estimated")
+    commission_verified_by_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    commission_verified_at = Column(DateTime, nullable=True)
+    reservation_date = Column(DateTime, nullable=True)
+    target_completion_date = Column(DateTime, nullable=True)
+    actual_completion_date = Column(DateTime, nullable=True)
+    cancellation_or_failure_reason = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    stage_history = Column(Text, nullable=False, default="[]")
+    created_by_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    updated_by_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    lead = relationship("Lead", foreign_keys=[lead_id], lazy="selectin")
+    property_record = relationship("Property", foreign_keys=[property_id], lazy="selectin")
+    offer = relationship("Offer", foreign_keys=[offer_id], lazy="selectin")
+    assigned_agent = relationship("Agent", foreign_keys=[assigned_agent_id], lazy="selectin")
+    checklist_items = relationship(
+        "DealChecklistItem",
+        backref="deal",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="DealChecklistItem.id.asc()",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "transaction_type IN ('purchase','rent','lease')",
+            name="ck_deals_type",
+        ),
+        CheckConstraint(
+            "status IN ('qualification','viewing','offer_preparation','negotiation',"
+            "'offer_accepted','reservation_pending','reservation_confirmed',"
+            "'documentation_pending','transaction_pending_completion',"
+            "'completed','cancelled','failed')",
+            name="ck_deals_status",
+        ),
+        CheckConstraint(
+            "commission_status IN ('estimated','verified','earned','paid')",
+            name="ck_deals_commission_status",
+        ),
+        CheckConstraint("agreed_amount > 0", name="ck_deals_agreed_amount"),
+        Index("ix_deals_lead_property_status", "lead_id", "property_id", "status"),
+        Index("ix_deals_agent_status", "assigned_agent_id", "status"),
+    )
+
+
+class DealChecklistItem(Base):
+    """Configurable document & compliance milestone item on a Deal (Phase F)."""
+    __tablename__ = "deal_checklist_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    deal_id = Column(Integer, ForeignKey("deals.id"), nullable=False, index=True)
+    code = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    category = Column(String, nullable=False, default="compliance")
+    is_required = Column(Boolean, nullable=False, default=True)
+    status = Column(String, nullable=False, default="pending")
+    document_reference = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    responsible_user_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    verified_by_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    verified_by_label = Column(String, nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','uploaded','received','reviewed','verified','waived')",
+            name="ck_deal_checklist_status",
+        ),
+        Index("ix_deal_checklist_deal_code", "deal_id", "code"),
+    )
+
+
+class CustomerCommunication(Base):
+    """Structured customer-agent communication and internal notes (Phase H)."""
+    __tablename__ = "customer_communications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True, index=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=True, index=True)
+    appointment_id = Column(Integer, ForeignKey("appointments.id"), nullable=True, index=True)
+    sender_type = Column(String, nullable=False)  # customer | agent | system
+    sender_agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True, index=True)
+    channel = Column(String, nullable=False, default="portal")  # portal | email | whatsapp | phone | internal_note
+    subject = Column(String, nullable=True)
+    message = Column(Text, nullable=False)
+    is_customer_visible = Column(Boolean, nullable=False, default=True, index=True)
+    follow_up_needed = Column(Boolean, nullable=False, default=False)
+    follow_up_status = Column(String, nullable=True)  # pending | completed
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    customer = relationship("Customer", foreign_keys=[customer_id], back_populates="communications", lazy="selectin")
+    sender_agent = relationship("Agent", foreign_keys=[sender_agent_id], lazy="selectin")
+    lead = relationship("Lead", foreign_keys=[lead_id], lazy="selectin")
+    property_record = relationship("Property", foreign_keys=[property_id], lazy="selectin")
+    appointment = relationship("Appointment", foreign_keys=[appointment_id], lazy="selectin")
+
+    __table_args__ = (
+        CheckConstraint(
+            "sender_type IN ('customer','agent','system')",
+            name="ck_customer_comm_sender_type",
+        ),
+        Index("ix_customer_comm_customer_visible", "customer_id", "is_customer_visible", "created_at"),
+    )
+
+
+class PropertyImportBatch(Base):
+    """Audit log and staging tracker for property import operations (Phase I)."""
+    __tablename__ = "property_import_batches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(String, unique=True, nullable=False, index=True)
+    source = Column(String, nullable=False, default="uae_dataset")  # uae_dataset | json_file | csv_upload | manual_batch
+    filename = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="preview")  # preview | staged | completed | failed
+    total_records = Column(Integer, nullable=False, default=0)
+    valid_records = Column(Integer, nullable=False, default=0)
+    invalid_records = Column(Integer, nullable=False, default=0)
+    duplicate_records = Column(Integer, nullable=False, default=0)
+    imported_records = Column(Integer, nullable=False, default=0)
+    validation_report = Column(Text, nullable=True)  # JSON summary of errors/warnings
+    created_by_agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    created_by_agent = relationship("Agent", foreign_keys=[created_by_agent_id], lazy="selectin")
+
+
+class CustomerNotification(Base):
+    """In-app notifications for customers and agents (Phase H)."""
+    __tablename__ = "customer_notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    recipient_type = Column(String, nullable=False)  # customer | agent
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
+    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True, index=True)
+    category = Column(String, nullable=False, default="general")  # appointment | viewing | offer | deal | general | system
+    title = Column(String, nullable=False)
+    message = Column(Text, nullable=False)
+    related_type = Column(String, nullable=True)  # appointment | property | deal | lead
+    related_id = Column(Integer, nullable=True)
+    action_url = Column(String, nullable=True)
+    is_read = Column(Boolean, nullable=False, default=False, index=True)
+    read_at = Column(DateTime, nullable=True)
+    idempotency_key = Column(String, unique=True, nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    customer = relationship("Customer", foreign_keys=[customer_id], back_populates="notifications", lazy="selectin")
+    agent = relationship("Agent", foreign_keys=[agent_id], lazy="selectin")
+
+    __table_args__ = (
+        CheckConstraint(
+            "recipient_type IN ('customer','agent')",
+            name="ck_cust_notif_recipient_type",
+        ),
+        Index("ix_cust_notif_customer_unread", "customer_id", "is_read", "created_at"),
+        Index("ix_cust_notif_agent_unread", "agent_id", "is_read", "created_at"),
+    )
+
+
+
+
+# ================================================================
+# STAGE 6J — HR MANAGEMENT FOUNDATION
+# ================================================================
+
+class Employee(Base):
+    """Employee master records linked to system users (Stage 6J)."""
+    __tablename__ = "employees"
+
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id = Column(Integer, ForeignKey("agents.id"), unique=True, nullable=True, index=True)
+    employee_id = Column(String(50), unique=True, nullable=False, index=True)
+    full_name = Column(String(150), nullable=False, index=True)
+    official_email = Column(String(200), unique=True, nullable=False, index=True)
+    contact_number = Column(String(50), nullable=True)
+    department = Column(String(100), nullable=False, default="Sales", index=True)
+    designation = Column(String(100), nullable=False, default="Real Estate Consultant")
+    reporting_manager_id = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    employment_type = Column(String(50), nullable=False, default="Full-time")  # Full-time | Part-time | Contract | Probation
+    joining_date = Column(Date, nullable=True)
+    employment_status = Column(String(50), nullable=False, default="Active", index=True)  # Active | On Leave | Suspended | Resigned | Terminated
+    crm_role = Column(String(50), nullable=False, default="agent")
+    branch = Column(String(100), nullable=False, default="Dubai Main Branch")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_by = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    updated_by = Column(Integer, ForeignKey("agents.id"), nullable=True)
+
+    agent = relationship("Agent", foreign_keys=[agent_id], lazy="selectin", backref="employee_profile")
+    reporting_manager = relationship("Employee", remote_side=[id], foreign_keys=[reporting_manager_id], lazy="selectin")
+    attendance_records = relationship("Attendance", backref="employee", cascade="all, delete-orphan", lazy="selectin")
+    leave_requests = relationship("LeaveRequest", backref="employee", cascade="all, delete-orphan", lazy="selectin")
+
+    __table_args__ = (
+        CheckConstraint(
+            "employment_status IN ('Active','On Leave','Suspended','Resigned','Terminated')",
+            name="ck_employee_status",
+        ),
+    )
+
+
+class Attendance(Base):
+    """Daily employee attendance tracking and corrections (Stage 6J)."""
+    __tablename__ = "attendance"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False, index=True)
+    attendance_date = Column(Date, nullable=False, index=True)
+    status = Column(String(50), nullable=False, default="Present", index=True)
+    check_in = Column(DateTime, nullable=True)
+    check_out = Column(DateTime, nullable=True)
+    shift = Column(String(50), nullable=False, default="Standard (09:00 - 18:00 GST)")
+    work_mode = Column(String(50), nullable=True, default="OFFICE")  # OFFICE | WORK_FROM_HOME | FIELD_DUTY
+    source = Column(String(50), nullable=False, default="web")  # web | manual_correction | system_auto
+    notes = Column(Text, nullable=True)
+    correction_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_by = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    last_modified_by = Column(Integer, ForeignKey("agents.id"), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("employee_id", "attendance_date", name="uq_attendance_emp_date"),
+        CheckConstraint(
+            "status IN ('Present','Absent','Late','Half Day','Field Duty','Work From Home','On Leave','Holiday','Weekly Off')",
+            name="ck_attendance_status",
+        ),
+    )
+
+
+class LeaveRequest(Base):
+    """Employee leave requests and approvals (Stage 6J)."""
+    __tablename__ = "leave_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False, index=True)
+    leave_type = Column(String(50), nullable=False)  # Casual Leave | Sick Leave | Annual/Earned Leave | Unpaid Leave | Other
+    start_date = Column(Date, nullable=False, index=True)
+    end_date = Column(Date, nullable=False, index=True)
+    days_count = Column(Float, nullable=False, default=1.0)
+    reason = Column(Text, nullable=False)
+    status = Column(String(50), nullable=False, default="pending", index=True)  # pending | approved | rejected | cancelled
+    reviewed_by = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    review_notes = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    reviewer = relationship("Agent", foreign_keys=[reviewed_by], lazy="selectin")
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','approved','rejected','cancelled')",
+            name="ck_leave_request_status",
+        ),
+        CheckConstraint(
+            "leave_type IN ('Casual Leave','Sick Leave','Annual/Earned Leave','Unpaid Leave','Other')",
+            name="ck_leave_type",
+        ),
+    )
+
+
 # ---------------------------------------------------------------- migration
 
 # create_all() only creates missing tables — it never alters existing ones.
@@ -596,9 +1122,17 @@ _MIGRATIONS = {
         ("clarification_questions", "TEXT"),
         ("timeline_days", "INTEGER"),
         ("extraction_source", "VARCHAR"),
+        # ---- AI brain upgrade (all nullable; NULL = not set) ----
+        ("temperature", "VARCHAR"),            # hot|warm|cold (server-classified)
+        ("temperature_rationale", "TEXT"),     # JSON evidence for the temperature
+        ("temperature_source", "VARCHAR"),     # auto|manual (manual locks auto-recompute)
+        ("temperature_updated_at", "DATETIME"),
+        ("summary", "TEXT"),                   # short conversation summary
+        ("last_customer_message", "TEXT"),     # most recent customer message
     ],
     "conversations": [
         ("customer_id", "INTEGER REFERENCES customers(id)"),
+        ("memory", "TEXT"),
     ],
     "messages": [
         ("message_type", "VARCHAR"),
@@ -614,6 +1148,15 @@ _MIGRATIONS = {
     ],
     "customers": [
         ("password_hash", "VARCHAR"),
+        ("preferred_locations", "TEXT"),
+        ("property_type", "VARCHAR"),
+        ("bedrooms_min", "INTEGER"),
+        ("bedrooms_max", "INTEGER"),
+        ("budget_min", "FLOAT"),
+        ("budget_max", "FLOAT"),
+        ("budget_currency", "VARCHAR DEFAULT 'AED'"),
+        ("purpose", "VARCHAR"),
+        ("preferred_contact_method", "VARCHAR"),
     ],
     # ---------------- Global auth (additive; every column nullable/defaulted) ---
     # No row is deleted or rewritten; existing staff keep working unchanged.
@@ -625,7 +1168,29 @@ _MIGRATIONS = {
         ("locked_until", "DATETIME"),
         ("updated_at", "DATETIME"),
     ],
+    "properties": [
+        ("is_published", "BOOLEAN DEFAULT 0"),
+        ("verification_status", "VARCHAR DEFAULT 'unverified'"),
+        ("rejection_reason", "TEXT"),
+        ("published_at", "DATETIME"),
+        ("images", "TEXT DEFAULT '[]'"),
+        ("primary_image", "VARCHAR"),
+        ("source_id", "VARCHAR"),
+        ("import_batch_id", "VARCHAR"),
+        ("archived_at", "DATETIME"),
+    ],
 }
+
+
+def _resolve_migration_type(decl: str, dialect_name: str) -> str:
+    """Translate SQLite column declarations to dialect-compatible SQL when needed.
+
+    PostgreSQL uses ``TIMESTAMP`` rather than ``DATETIME``; SQLite and libSQL
+    keep ``DATETIME`` unchanged.
+    """
+    if dialect_name == "postgresql" and decl == "DATETIME":
+        return "TIMESTAMP"
+    return decl
 
 
 def _run_migrations(target_engine=None):
@@ -637,6 +1202,7 @@ def _run_migrations(target_engine=None):
     from sqlalchemy import inspect as sa_inspect, text
 
     eng = target_engine or engine
+    dialect_name = eng.dialect.name
     inspector = sa_inspect(eng)
     existing_tables = set(inspector.get_table_names())
     for table, cols in _MIGRATIONS.items():
@@ -646,7 +1212,23 @@ def _run_migrations(target_engine=None):
         with eng.begin() as conn:
             for name, decl in cols:
                 if name not in have:
-                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {name} {decl}'))
+                    col_decl = _resolve_migration_type(decl, dialect_name)
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {name} {col_decl}'))
+
+    if "properties" in existing_tables:
+        with eng.begin() as conn:
+            # Phase I backfill: existing demo/approved rows should be verified and published if available
+            bool_true = "TRUE" if dialect_name == "postgresql" else "1"
+            bool_false = "FALSE" if dialect_name == "postgresql" else "0"
+            conn.execute(text(
+                f"UPDATE properties SET verification_status = 'verified' "
+                f"WHERE is_approved = {bool_true} AND (verification_status IS NULL OR verification_status = 'unverified')"
+            ))
+            conn.execute(text(
+                f"UPDATE properties SET is_published = {bool_true} "
+                f"WHERE is_approved = {bool_true} AND availability = 'available' "
+                f"AND (is_published IS NULL OR is_published = {bool_false}) AND source = 'demo_seed'"
+            ))
 
 
 # Indexes on columns that were added by ALTER (create_all can't index those
@@ -663,6 +1245,15 @@ _POST_MIGRATION_INDEXES = [
     "ON property_recommendations (match_score)",
     "CREATE INDEX IF NOT EXISTS ix_recommendations_property_record_id "
     "ON property_recommendations (property_record_id)",
+    "CREATE INDEX IF NOT EXISTS ix_leads_temperature ON leads (temperature)",
+    "CREATE INDEX IF NOT EXISTS ix_conversations_lead_id ON conversations (lead_id)",
+    "CREATE INDEX IF NOT EXISTS ix_cust_notif_customer_unread ON customer_notifications (customer_id, is_read, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_cust_notif_agent_unread ON customer_notifications (agent_id, is_read, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_customer_comm_customer_visible ON customer_communications (customer_id, is_customer_visible, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_properties_published ON properties (is_published)",
+    "CREATE INDEX IF NOT EXISTS ix_properties_verification ON properties (verification_status)",
+    "CREATE INDEX IF NOT EXISTS ix_properties_source_id ON properties (source_id)",
+    "CREATE INDEX IF NOT EXISTS ix_properties_import_batch ON properties (import_batch_id)",
 ]
 
 

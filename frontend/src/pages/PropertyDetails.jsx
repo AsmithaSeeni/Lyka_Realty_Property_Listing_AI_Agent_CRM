@@ -3,6 +3,7 @@ import { useNavigate, useParams, Link, useLocation } from 'react-router-dom'
 import api from '../api.js'
 import { hasInAppHistory } from '../nav.js'
 import { priceLabel, DemoBadge, PURPOSE_LABEL } from '../components/PropBits.jsx'
+import ViewingRequestModal from '../customer/ViewingRequestModal.jsx'
 
 /* Phase 6 — one detail component for the two established URL aliases:
    - /properties/:id  → DB-backed Lyka listing (approved + available only,
@@ -23,6 +24,7 @@ export default function PropertyDetails() {
   const [customer, setCustomer] = React.useState(null)
   const [saved, setSaved] = React.useState(false)
   const [keepPrompt, setKeepPrompt] = React.useState(false) // guest save nudge
+  const [viewModalOpen, setViewModalOpen] = React.useState(false)
 
   // True browser "back" only works when this tab actually navigated here from
   // another page of the app. Property pages are also reached from the agent
@@ -181,11 +183,41 @@ export default function PropertyDetails() {
           ← Back to listings
         </button>
 
-        {/* Branded placeholder — the database has no listing photos, and we
-            never invent property photographs. */}
-        <div className="prop-detail-hero">
-          <span>{emoji}</span>
-        </div>
+        {/* Branded Media Hero: Display primary photograph if available with emoji fallback */}
+        {prop.primary_image || (prop.images && prop.images.length > 0) ? (
+          <div style={{ marginBottom: 20 }}>
+            <div className="prop-detail-hero" style={{ overflow: 'hidden', padding: 0 }}>
+              <img
+                src={prop.primary_image || (typeof prop.images[0] === 'string' ? prop.images[0] : prop.images[0]?.url)}
+                alt={prop.title}
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                onError={(e) => {
+                  e.target.style.display = 'none'
+                  if (e.target.parentElement) {
+                    e.target.parentElement.innerHTML = `<span>${emoji}</span>`
+                  }
+                }}
+              />
+            </div>
+            {prop.images && prop.images.length > 1 && (
+              <div style={{ display: 'flex', gap: 10, marginTop: 10, overflowX: 'auto', paddingBottom: 6 }}>
+                {prop.images.map((img, idx) => {
+                  const url = typeof img === 'string' ? img : img?.url
+                  if (!url) return null
+                  return (
+                    <div key={idx} style={{ width: 120, height: 80, flexShrink: 0, borderRadius: 6, overflow: 'hidden', border: '1px solid #cbd5e1' }}>
+                      <img src={url} alt={`${prop.title} ${idx + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="prop-detail-hero">
+            <span>{emoji}</span>
+          </div>
+        )}
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 14 }}>
           <div>
@@ -207,10 +239,22 @@ export default function PropertyDetails() {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <button
+              className="btn gold btn-sm"
+              onClick={() => {
+                if (customer?.authenticated) {
+                  setViewModalOpen(true)
+                } else {
+                  navigate(`/login?next=${encodeURIComponent(pathname)}`)
+                }
+              }}
+            >
+              📅 Request Viewing
+            </button>
             {/* The conversation-first way back: returns to LykAI with this
                 listing already in context (no id, no new search) */}
-            <button className="btn gold btn-sm" onClick={askLykAI}>
-              <span className="ico">→</span> Ask LykAI about this property
+            <button className="btn ghost btn-sm" onClick={askLykAI}>
+              <span className="ico">→</span> Ask LykAI
             </button>
             <button className="btn ghost btn-sm" onClick={toggleSave}>
               {saved ? '♥ Saved' : '♡ Save'}
@@ -381,6 +425,13 @@ export default function PropertyDetails() {
         ℹ️ Details shown above come directly from the UAE property dataset. Availability
         and pricing are subject to confirmation by a Lyka Realty consultant.
       </div>
+
+      <ViewingRequestModal
+        property={prop ? { ...prop, property_id: prop.id, source: space } : null}
+        isOpen={viewModalOpen}
+        onClose={() => setViewModalOpen(false)}
+        onSuccess={() => navigate('/portal/appointments')}
+      />
     </div>
   )
 }

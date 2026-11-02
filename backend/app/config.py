@@ -19,6 +19,7 @@ Design rules:
 
 import os
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -66,6 +67,10 @@ def parse_cors(raw: str, app_env: str):
       cross-site, so a wildcard must never reach production); any other
       configured origins are kept. In development ``*`` is allowed but still
       logged as a note by the caller's docs — it is a dev-only convenience.
+    - In non-production environments (development/test), local dev origins
+      (Vite dev server and API on localhost and 127.0.0.1) are automatically
+      merged into the origin list so local development always works smoothly
+      even when an external origin (e.g. Vercel) is specified in .env.
     """
     default = [
         "http://localhost:5173",
@@ -76,10 +81,15 @@ def parse_cors(raw: str, app_env: str):
     if not raw:
         return list(default)
     origins = [o.strip() for o in raw.split(",") if o.strip()]
-    if "*" in origins and (app_env or "").lower() == "production":
+    is_prod = (app_env or "").lower() == "production"
+    if "*" in origins and is_prod:
         origins = [o for o in origins if o != "*"]
         if not origins:
             return []  # explicit hard failure: configure real origins
+    if not is_prod and "*" not in origins:
+        for d in default:
+            if d not in origins:
+                origins.append(d)
     return origins
 
 
@@ -96,22 +106,29 @@ ACTIVE_DB_FILE = BACKEND_DIR / "real_estate.db"
 def _database_url() -> str:
     explicit = _env("DATABASE_URL", "")
     if not explicit:
-        return "sqlite:///" + ACTIVE_DB_FILE.as_posix()
-    # Turso/libSQL URL normalisation. sqlalchemy-libsql==0.2.0 registers ONLY
-    # the `sqlite+libsql` / `sqlite+aiolibsql` dialects (wheel entry_points:
-    # "sqlite.libsql", "sqlite.aiolibsql") — a raw `libsql://`, `https://` or
-    # `http://` DSN (the exact forms the Turso CLI prints and our docs give)
-    # would make create_engine() fail at import with "Did not find a dialect
-    # named ...". Operators keep writing the documented forms; they are
-    # rewritten to the registered dialect here, adding the transport flag
-    # Turso's own docs use unless the URL already carries a query string.
-    if explicit.startswith(("libsql://", "https://", "http://")):
-        scheme, rest = explicit.split("://", 1)
-        secure = "false" if scheme == "http" else "true"
-        url = "sqlite+libsql://" + rest
-        if "?" not in rest:
-            url += "?secure=" + secure
-        return url
+        explicit = _env("LYKA_PG_DEV_URL", "")
+    if not explicit:
+        # If in test mode with TEST_DATABASE_URL, let conftest govern
+        test_url = _env("TEST_DATABASE_URL", "")
+        if test_url:
+            explicit = test_url
+        else:
+            raise RuntimeError(
+                "FATAL: DATABASE_URL is not set. Lyka Realty CRM requires an authoritative "
+                "PostgreSQL database connection (e.g., postgresql+psycopg://...)."
+            )
+
+    # Normalize standard Postgres schemes to modern psycopg 3 scheme
+    if explicit.startswith("postgres://"):
+        explicit = "postgresql+psycopg://" + explicit[len("postgres://"):]
+    elif explicit.startswith("postgresql://") and not explicit.startswith("postgresql+psycopg://"):
+        explicit = "postgresql+psycopg://" + explicit[len("postgresql://"):]
+
+    # Enforce sslmode=require for Render or remote postgres if not specified
+    if "render.com" in explicit and "sslmode=" not in explicit:
+        separator = "&" if "?" in explicit else "?"
+        explicit = f"{explicit}{separator}sslmode=require"
+
     return explicit
 
 
@@ -127,14 +144,14 @@ class Settings:
     )
 
     # ---------------- TTS settings (existing)
-    TTS_PROVIDER: str = _env("TTS_PROVIDER", "nvidia")
-    TTS_MODEL: str = _env("TTS_MODEL", "magpie-tts-multilingual")
-    TTS_VOICE: str = _env("TTS_VOICE", "mia")
+    TTS_PROVIDER: str = _env("TTS_PROVIDER", "sarvam")
+    TTS_MODEL: str = _env("TTS_MODEL", "bulbul:v4-flash")
+    TTS_VOICE: str = _env("TTS_VOICE", "aparna_en_edtech")
     TTS_API_KEY: str = _env("TTS_API_KEY", "")
 
     # ---------------- STT settings (existing)
-    STT_PROVIDER: str = _env("STT_PROVIDER", "groq")
-    STT_MODEL: str = _env("STT_MODEL", "whisper-large-v3-turbo")
+    STT_PROVIDER: str = _env("STT_PROVIDER", "sarvam")
+    STT_MODEL: str = _env("STT_MODEL", "saaras:v1")
     STT_API_KEY: str = _env("STT_API_KEY", "")
 
     # ---------------- OpenAI (Phase 3 — structured lead extraction ONLY)
@@ -154,6 +171,7 @@ class Settings:
     # hard-coded True is gone; nothing in the app read the old value.)
     DEBUG: bool = _bool("DEBUG", False)
     DATABASE_URL: str = _database_url()
+    TEST_DATABASE_URL: Optional[str] = _env("TEST_DATABASE_URL", None)
 
     # ---------------- CORS
     CORS_ORIGINS: list = parse_cors(_env("CORS_ORIGINS", ""), APP_ENV)

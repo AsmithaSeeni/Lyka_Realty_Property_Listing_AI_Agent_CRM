@@ -123,6 +123,23 @@ def get_current_agent(
     if agent is None or not agent.is_active:
         raise HTTPException(status_code=401, detail="Agent account disabled")
 
+    # Enforce mandatory password change if required
+    if getattr(agent, "must_change_password", False):
+        path = getattr(request, "url", None) and request.url.path or ""
+        allowed = {
+            "/api/auth/change-password",
+            "/api/auth/me",
+            "/api/auth/logout",
+            "/api/agent/auth/me",
+            "/api/agent/auth/logout",
+        }
+        if path not in allowed and not path.startswith("/api/auth/"):
+            raise HTTPException(
+                status_code=403,
+                detail="Password change required before accessing CRM operations",
+                headers={"X-Must-Change-Password": "true"},
+            )
+
     # Resolve roles + permissions ONCE per request; every downstream
     # require_permission()/has_permission() check reuses this cached set.
     cache_permissions(db, agent)
@@ -325,27 +342,26 @@ def claim_guest_conversations(db: Session, guest: Customer, account: Customer) -
 
 # ---------------------------------------------------------------- RBAC scope
 
-def lead_in_scope(agent: Agent, lead) -> bool:
-    """Role-based data scope, driven by PERMISSIONS not role-name strings.
-
-    - holds ``leads.read_all`` (admin, sales manager) → every lead
-    - otherwise (agent, support) → leads assigned to them, plus unassigned
-      leads (the shared pickup pool) so new AI leads are visible to the team.
-    """
-    if rbac.has_permission(agent, "leads.read_all"):
-        return True
-    return lead.assigned_agent_id is None or lead.assigned_agent_id == agent.id
-
-
-def scoped_lead_query(db: Session, agent: Agent):
-    """Leads this agent is allowed to see (permission-scoped)."""
-    q = db.query(Lead)
-    if not rbac.has_permission(agent, "leads.read_all"):
-        q = q.filter(
-            (Lead.assigned_agent_id.is_(None)) | (Lead.assigned_agent_id == agent.id)
-        )
-    return q
-
+# Delegated to central scoping service
+from app.services.scoping import (
+    can_read_all_leads,
+    can_read_unassigned_leads,
+    can_read_all_conversations,
+    lead_in_scope,
+    scoped_lead_query,
+    conversation_in_scope,
+    scoped_conversation_query,
+    customer_in_scope,
+    scoped_customer_query,
+    followup_in_scope,
+    scoped_followup_query,
+    appointment_in_scope,
+    scoped_appointment_query,
+    offer_in_scope,
+    scoped_offer_query,
+    deal_in_scope,
+    scoped_deal_query,
+)
 
 # ---------------------------------------------------------------- dependencies
 # Reusable FastAPI authorisation dependencies. These enforce authorization on
@@ -372,10 +388,11 @@ def require_roles(*role_keys: str):
     unknown = [r for r in role_keys if not rbac.is_known_role(r)]
     if unknown:
         raise RuntimeError(f"require_roles: unknown role(s) {unknown}")
+    normalized_targets = {rbac.normalize_role(r) for r in role_keys}
 
     def dependency(agent: Agent = Depends(get_current_agent)) -> Agent:
         # get_current_agent already cached the full effective role list.
-        if not set(roles_of(agent)) & set(role_keys):
+        if not set(roles_of(agent)) & normalized_targets:
             raise HTTPException(status_code=403, detail="Not authorised for this action")
         return agent
 

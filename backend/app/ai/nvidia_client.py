@@ -22,13 +22,13 @@ _CLIENT: Optional[httpx.Client] = None
 # routed to NVIDIA_MODEL_TAMIL (same key/endpoint), which runs thinking OFF -
 # measured 2026-10: thinking on -> 46.6s of reasoning and an EMPTY reply;
 # thinking off -> 11.2s committed natural Tamil.
-THINKING_OFF_LANGUAGES = {"en", "ta-Latn"}
+THINKING_OFF_LANGUAGES = {"en", "ta-Latn", "ar", "hi", "hi-Latn", "ml", "te", "fr", "es", "de", "ru"}
 
 # Reply languages answered by the stronger multilingual Tamil model.
 TAMIL_MODEL_LANGUAGES = {"ta", "ta-Latn", "mixed"}
 
 # Default model for those turns (env-overridable via NVIDIA_MODEL_TAMIL).
-TAMIL_MODEL_DEFAULT = "nvidia/nemotron-3-super-120b-a12b"
+TAMIL_MODEL_DEFAULT = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 
 def _get_client() -> httpx.Client:
@@ -64,6 +64,11 @@ class NVIDIAClient:
             os.getenv("NVIDIA_MODEL_TAMIL", "").strip() or TAMIL_MODEL_DEFAULT
         )
         self.base_url = "https://integrate.api.nvidia.com/v1"
+        # Capability cache for response_format JSON mode (None = not probed
+        # yet). Once the endpoint rejects JSON mode we stop re-probing it for
+        # the process lifetime, so chat never pays a failing round-trip per
+        # message — callers fall back to their rules-only path instead.
+        self._json_mode: Optional[bool] = None
 
     # ------------------------------------------------------------------
     # Payload construction (kept separate so it is unit-testable)
@@ -159,6 +164,15 @@ class NVIDIAClient:
             started = _time.perf_counter()
             try:
                 response = _get_client().post(url, headers=headers, json=payload)
+                if response.status_code == 404 and payload.get("model") != self.model:
+                    logger.warning(
+                        "NVIDIA model %s returned 404 - retrying with base model %s",
+                        payload.get("model"), self.model,
+                    )
+                    payload["model"] = self.model
+                    payload["chat_template_kwargs"] = {"enable_thinking": False}
+                    last_error = None
+                    continue
                 if response.status_code >= 500 and attempt == 1:
                     logger.warning(
                         "NVIDIA API %d on attempt %d - retrying",
@@ -211,6 +225,51 @@ class NVIDIAClient:
         # Defensive: never reached in practice
         logger.error("NVIDIA API failed after retries: %s", last_error)
         return self._fallback_response(user_message, language)
+
+    def chat_json_sync(
+        self,
+        system_prompt: str,
+        user_message: str,
+        *,
+        timeout: float = 8.0,
+    ) -> Optional[str]:
+        """One JSON-object completion on the chat provider.
+
+        Used by the preference-extraction layer: temperature 0, thinking off,
+        `response_format: json_object`, a tight timeout, and NO conversational
+        fallback or response cleanup — the caller parses the RAW content and
+        treats any failure (or a missing API key) as "no extraction", falling
+        back to the deterministic rules. JSON-mode support is capability-cached
+        (`_json_mode`) so an unsupported endpoint is probed only once.
+        """
+        if not self.api_key or self._json_mode is False:
+            return None
+        payload = self._build_payload(system_prompt, user_message, None, language="en")
+        payload["temperature"] = 0.0
+        payload["max_tokens"] = 700
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+        payload["response_format"] = {"type": "json_object"}
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{self.base_url}/chat/completions"
+        try:
+            response = _get_client().post(url, headers=headers, json=payload, timeout=timeout)
+            if response.status_code in (400, 404, 422):
+                self._json_mode = False
+                logger.info(
+                    "NVIDIA JSON mode rejected (HTTP %d) - disabled for this process",
+                    response.status_code,
+                )
+                return None
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.warning("NVIDIA JSON extraction unavailable: %s", e)
+            return None
+        self._json_mode = True
+        return content
 
     def _clean_response(self, content: str) -> str:
         """Strip model thinking/reasoning preamble so customers only see
@@ -365,6 +424,12 @@ class NVIDIAClient:
                 "LykAI-ஐ அணுக இப்போது முடியவில்லை. சிறிது நேரம் கழித்து "
                 "மீண்டும் முயற்சிக்கவும்."
             )
+        elif language == "ar":
+            return "تعذر الاتصال بـ LykAI في الوقت الحالي. يرجى المحاولة مرة أخرى بعد قليل."
+        elif language == "hi":
+            return "LykAI से संपर्क करने में समस्या आ रही है। कृपया कुछ समय बाद पुनः प्रयास करें।"
+        elif language == "fr":
+            return "LykAI rencontre des difficultés pour se connecter actuellement. Veuillez réessayer dans quelques instants."
         return (
             "LykAI is having trouble reaching its service right now, so I can't "
             "search listings at the moment. Please try again in a little while."
